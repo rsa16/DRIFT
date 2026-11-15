@@ -2,12 +2,33 @@ import json
 import logging
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from drift.api import create_app
-from drift.config import Settings
+from drift.config import DEFAULT_IRSA_BASE, Settings
 from drift.logging import log_external_request
 from drift.manifest import validate
+
+_CONFIG_VARS = [
+    "DRIFT_SNAPSHOT_DIR",
+    "DRIFT_CACHE_DIR",
+    "DRIFT_LIVE_ENABLED",
+    "DRIFT_IRSA_BASE",
+    "DRIFT_TLS_CERT",
+    "DRIFT_TLS_KEY",
+    "DRIFT_DOMAIN",
+    "DRIFT_ENV_FILE",
+]
+
+
+@pytest.fixture
+def clean_config_env(monkeypatch, tmp_path):
+    for name in _CONFIG_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
 
 
 def _settings(tmp_path) -> Settings:
@@ -82,6 +103,72 @@ def test_config_reads_only_documented_environment_variables(tmp_path):
     assert settings.tls_key is not None
     assert settings.domain == "drift.example.invalid"
     assert not hasattr(settings, "unrelated_setting")
+
+
+def test_config_defaults_come_from_the_process_environment(
+    clean_config_env, monkeypatch
+):
+    monkeypatch.setenv("DRIFT_SNAPSHOT_DIR", str(clean_config_env / "snap"))
+    monkeypatch.setenv("DRIFT_IRSA_BASE", "https://irsa.example.invalid")
+
+    settings = Settings.from_env()
+
+    assert settings.snapshot_dir == clean_config_env / "snap"
+    assert settings.irsa_base == "https://irsa.example.invalid"
+    assert settings.live_enabled is False
+    assert settings.tls_cert is None
+
+
+def test_config_reads_a_local_env_file(clean_config_env):
+    (clean_config_env / ".env").write_text(
+        f"DRIFT_SNAPSHOT_DIR={clean_config_env / 'snap'}\nDRIFT_LIVE_ENABLED=true\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings.from_env()
+
+    assert settings.snapshot_dir == clean_config_env / "snap"
+    assert settings.live_enabled is True
+
+
+def test_real_environment_wins_over_the_env_file(clean_config_env, monkeypatch):
+    (clean_config_env / ".env").write_text(
+        "DRIFT_IRSA_BASE=https://file.example.invalid\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DRIFT_IRSA_BASE", "https://env.example.invalid")
+
+    assert Settings.from_env().irsa_base == "https://env.example.invalid"
+
+
+def test_env_file_can_be_pointed_elsewhere(clean_config_env, monkeypatch):
+    (clean_config_env / "other.env").write_text(
+        "DRIFT_IRSA_BASE=https://other.example.invalid\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DRIFT_ENV_FILE", "other.env")
+
+    assert Settings.from_env().irsa_base == "https://other.example.invalid"
+
+
+def test_empty_env_file_variable_disables_file_loading(clean_config_env, monkeypatch):
+    (clean_config_env / ".env").write_text(
+        "DRIFT_IRSA_BASE=https://file.example.invalid\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DRIFT_ENV_FILE", "")
+
+    assert Settings.from_env().irsa_base == DEFAULT_IRSA_BASE
+
+
+def test_config_rejects_an_unparseable_boolean(tmp_path):
+    with pytest.raises(ValidationError):
+        Settings.from_env(
+            {
+                "DRIFT_SNAPSHOT_DIR": str(tmp_path / "snap"),
+                "DRIFT_LIVE_ENABLED": "maybe",
+            }
+        )
 
 
 def test_health_without_a_snapshot_returns_four_fields_and_nulls(tmp_path):

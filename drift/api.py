@@ -13,11 +13,19 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from drift.config import Settings
 from drift.manifest import ManifestError, load_latest
 
 logger = logging.getLogger("drift.api")
+
+
+class HealthResponse(BaseModel):
+    snapshot_id: str | None = None
+    snapshot_age_s: int | None = None
+    plane_count: int = 0
+    disk_free_bytes: int
 
 
 def _existing_target(path: Path) -> Path:
@@ -56,7 +64,7 @@ def _mtime(path: Path) -> datetime | None:
         return None
 
 
-def health_payload(settings: Settings) -> dict[str, Any]:
+def health_payload(settings: Settings) -> HealthResponse:
     """Return snapshot id, age, plane count, and free disk space."""
     snapshot_dir = settings.snapshot_dir
     body: dict[str, Any] = {
@@ -70,10 +78,10 @@ def health_payload(settings: Settings) -> dict[str, Any]:
         pointer = load_latest(snapshot_dir)
     except ManifestError:
         logger.exception("latest.json is unreadable; reporting no snapshot")
-        return body
+        return HealthResponse.model_validate(body)
 
     if pointer is None:
-        return body
+        return HealthResponse.model_validate(body)
 
     body["snapshot_id"] = pointer.snapshot_id
     manifest_path = pointer.manifest_path(snapshot_dir)
@@ -82,7 +90,7 @@ def health_payload(settings: Settings) -> dict[str, Any]:
     except ManifestError:
         logger.exception("snapshot manifest is unreadable: %s", manifest_path)
         body["snapshot_age_s"] = _age_seconds(_mtime(manifest_path.parent))
-        return body
+        return HealthResponse.model_validate(body)
 
     age = _age_seconds(_parse_timestamp(manifest.generated_at))
     if age is None:
@@ -95,7 +103,7 @@ def health_payload(settings: Settings) -> dict[str, Any]:
         body["plane_count"] = sum(
             len(epoch.frames) for target in manifest.targets for epoch in target.epochs
         )
-    return body
+    return HealthResponse.model_validate(body)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -118,7 +126,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     @app.get("/api/v1/health")
-    def health() -> dict[str, Any]:
+    def health() -> HealthResponse:
         return health_payload(resolved)
 
     return app
