@@ -8,8 +8,17 @@ services:
       DRIFT_SNAPSHOT_DIR: /data/snapshots
       DRIFT_CACHE_DIR: /data/cache
       DRIFT_LIVE_ENABLED: "false"
+      DRIFT_ALLOW_FIXTURE: "true"
       DRIFT_IRSA_BASE: https://irsa.ipac.caltech.edu
       DRIFT_DOMAIN: ${DRIFT_DOMAIN:-localhost}
+    command:
+      - sh
+      - -c
+      - |
+        if [ ! -f /data/snapshots/latest.json ]; then
+          python -m drift.ingest fixture --synthetic --snapshot-dir /data/snapshots
+        fi
+        exec uvicorn drift.api:app --host 0.0.0.0 --port 8000
     volumes:
       - drift-data:/data
     expose:
@@ -26,16 +35,18 @@ services:
     restart: unless-stopped
 
   web:
-    image: caddy:2-alpine
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    image: drift-web:0.10
     depends_on:
       api:
         condition: service_healthy
     ports:
       - "8080:8080"
     volumes:
-      - ./web:/srv:ro
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - drift-data:/snapshots:ro
+      - drift-data:/drift:ro
       - caddy-data:/data
     restart: unless-stopped
 

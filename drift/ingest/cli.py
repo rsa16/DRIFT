@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -165,6 +166,17 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_CHANNELS,
         help="wavelength channels per matched bin (at least 2)",
     )
+    fixture_parser = subparsers.add_parser("fixture", help="build a synthetic snapshot")
+    fixture_parser.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="explicitly acknowledge that this snapshot is synthetic",
+    )
+    fixture_parser.add_argument(
+        "--snapshot-dir",
+        default=os.environ.get("DRIFT_SNAPSHOT_DIR", "/data/snapshots"),
+        help="snapshot directory to publish into (default: DRIFT_SNAPSHOT_DIR)",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "record":
@@ -176,7 +188,19 @@ def main(argv: list[str] | None = None) -> int:
             args.out,
             channels=args.channels,
         )
-    return replay(args.fixture)
+    if args.command == "replay":
+        return replay(args.fixture)
+    if not args.synthetic:
+        parser.error(
+            "fixture requires --synthetic; production snapshots use the "
+            "archive ingestion path without allow_fixture"
+        )
+
+    from drift.ingest.synthetic import build_synthetic_snapshot
+
+    pointer = build_synthetic_snapshot(args.snapshot_dir)
+    print(f"fixture: published {pointer.snapshot_id} to {args.snapshot_dir}")
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -2,17 +2,28 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import re
+import shutil
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 SUPPORTED_SCHEMA_VERSION = 1
+SAFE_SNAPSHOT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 class ManifestError(ValueError):
     """Raised when a manifest or snapshot pointer cannot be read or validated."""
+
+
+class FixtureSnapshotError(ManifestError):
+    """A fixture snapshot was offered to the production publish path."""
 
 
 class _Model(BaseModel):
@@ -70,6 +81,7 @@ class Manifest(_Model):
     schema_version: int
     snapshot_id: str
     generated_at: str | None = None
+    fixture: bool = False
     generator: dict[str, Any] | None = None
     processing: dict[str, Any] | None = None
     status: str | None = None
@@ -153,3 +165,106 @@ def load_latest(snapshot_dir: str | Path) -> SnapshotPointer | None:
         return SnapshotPointer.model_validate(payload)
     except ValidationError as exc:
         raise ManifestError(f"invalid snapshot pointer in {latest}: {exc}") from exc
+
+
+def is_fixture_manifest(manifest: Manifest) -> bool:
+    return bool(
+        manifest.fixture
+        or manifest.status == "fixture"
+        or manifest.snapshot_id.startswith("fixture-")
+    )
+
+
+def _window_values(window: Window | Mapping[str, Any]) -> dict[str, float]:
+    if isinstance(window, Window):
+        return {"lo": window.lo, "hi": window.hi, "s": window.s}
+    try:
+        return {
+            "lo": float(window["lo"]),
+            "hi": float(window["hi"]),
+            "s": float(window["s"]),
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ManifestError("a stretch window needs numeric lo, hi and s") from exc
+
+
+def window_sha256(window: Window | Mapping[str, Any]) -> str:
+    """Hash the canonical stretch window shared by every plane in a stack."""
+    values = _window_values(window)
+    canonical = json.dumps(values, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def publish_snapshot(
+    staging_dir: str | Path,
+    snapshot_dir: str | Path,
+    *,
+    allow_fixture: bool = False,
+    keep: int = 4,
+) -> SnapshotPointer:
+    """Publishes a staging snapshot and updates ``latest.json``."""
+    staging = Path(staging_dir)
+    snapshots = Path(snapshot_dir)
+    manifest_path = staging / "manifest.json"
+    try:
+        manifest = validate(manifest_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ManifestError(
+            f"cannot read staging manifest {manifest_path}: {exc}"
+        ) from exc
+
+    if is_fixture_manifest(manifest) and not allow_fixture:
+        raise FixtureSnapshotError(
+            f"snapshot {manifest.snapshot_id!r} is a fixture; the production "
+            "publish path requires allow_fixture=True"
+        )
+    if ".." in manifest.snapshot_id or not SAFE_SNAPSHOT_ID.fullmatch(
+        manifest.snapshot_id
+    ):
+        raise ManifestError(
+            f"unsafe snapshot_id {manifest.snapshot_id!r}; ids must be a single "
+            "path segment of letters, digits, dots, dashes and underscores"
+        )
+
+    version_root = snapshots / "v1"
+    version_root.mkdir(parents=True, exist_ok=True)
+    destination = version_root / manifest.snapshot_id
+    temporary = version_root / f".{manifest.snapshot_id}.tmp-{os.getpid()}"
+    if temporary.exists():
+        shutil.rmtree(temporary)
+    try:
+        shutil.copytree(staging, temporary)
+        if destination.exists():
+            shutil.rmtree(destination)
+        temporary.replace(destination)
+    except OSError as exc:
+        if temporary.exists():
+            shutil.rmtree(temporary, ignore_errors=True)
+        raise ManifestError(
+            f"cannot publish snapshot {manifest.snapshot_id}: {exc}"
+        ) from exc
+
+    pointer = SnapshotPointer(
+        snapshot_id=manifest.snapshot_id,
+        manifest=f"v1/{manifest.snapshot_id}/manifest.json",
+        published_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    )
+    latest = snapshots / "latest.json"
+    temporary_latest = snapshots / f".latest.json.tmp-{os.getpid()}"
+    temporary_latest.write_text(pointer.model_dump_json(), encoding="utf-8")
+    temporary_latest.replace(latest)
+
+    if keep > 0:
+        published = sorted(
+            (
+                item
+                for item in version_root.iterdir()
+                if item.is_dir() and not item.name.startswith(".")
+            ),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        for expired in published[keep:]:
+            shutil.rmtree(expired, ignore_errors=True)
+
+    return pointer
