@@ -20,6 +20,7 @@ export interface TargetSummary {
   fixture?: boolean;
   snapshot_id?: string;
   epoch_count: number;
+  visit_count?: number;
   frame_count: number;
   modes: Record<string, TargetMode>;
 }
@@ -33,8 +34,17 @@ export interface EpochDetail {
   frames?: unknown[];
 }
 
+export interface TimelineInfo {
+  default_band: number | null;
+  default_detector?: string | null;
+  visits: number;
+  span_days: number | null;
+  bands?: number[];
+}
+
 export interface TargetDetail extends TargetSummary {
   epochs: EpochDetail[];
+  timeline?: TimelineInfo | null;
   caveats?: string[];
   pixel_scale_arcsec: number;
   units: string;
@@ -67,9 +77,15 @@ export interface Health {
 
 export interface PlaneMeta {
   index: number;
-  band_index: number;
+  band_index?: number;
   band: number;
-  epoch_id: string;
+  detector?: string | null;
+  visit_id?: string;
+  mjd?: number | null;
+  date?: string | null;
+  collection?: string | null;
+  obs_publisher_did?: string | null;
+  epoch_id?: string;
   release: string;
   survey: number | null;
   mjd_min: number | null;
@@ -93,13 +109,34 @@ export interface FramesResponse {
   fixture: boolean;
   target_id: string;
   mode: string;
-  bins: number;
-  requested_bins: number;
-  epochs: EpochDetail[];
+  bins?: number;
+  requested_bins?: number;
+  band?: number;
+  detector?: string | null;
+  default_band?: number | null;
+  visits?: number;
+  visits_requested?: number;
+  available_visits?: number;
+  degraded?: boolean;
+  frames_omitted?: string[];
+  refused_frames?: string[];
+  span_days?: number;
+  visits_meta?: VisitMeta[];
+  epochs?: EpochDetail[];
   window: WindowInfo;
   pixel_scale_arcsec: number;
   units: string;
   planes: PlaneMeta[];
+}
+
+export interface VisitMeta {
+  visit_id: string;
+  mjd: number | null;
+  date: string | null;
+  release: string;
+  survey: number | null;
+  collection: string | null;
+  obs_publisher_did: string | null;
 }
 
 export class ApiError extends Error {
@@ -158,12 +195,23 @@ export function fetchTarget(id: string): Promise<TargetDetail> {
   return fetchJson<TargetDetail>(`/api/v1/targets/${encodeURIComponent(id)}`);
 }
 
+export interface FrameRequest {
+  mode?: "timeline" | "epoch" | "diff";
+  band?: number | null;
+  visits?: number;
+  bins?: number;
+}
+
 export function fetchFrames(
   id: string,
-  bins: number,
-  mode = "epoch",
+  request_: FrameRequest = {},
 ): Promise<FramesResponse> {
-  const params = new URLSearchParams({ mode, bins: String(bins) });
+  const params = new URLSearchParams({ mode: request_.mode ?? "timeline" });
+  if (request_.band !== null && request_.band !== undefined) {
+    params.set("band", String(request_.band));
+  }
+  if (request_.visits !== undefined) params.set("visits", String(request_.visits));
+  if (request_.bins !== undefined) params.set("bins", String(request_.bins));
   return fetchJson<FramesResponse>(
     `/api/v1/targets/${encodeURIComponent(id)}/frames?${params.toString()}`,
   );

@@ -174,9 +174,12 @@ def test_targets_route_reports_mode_eligibility(client: TestClient) -> None:
     assert response.status_code == 200
     body = response.json()
     by_id = {target["id"]: target for target in body["targets"]}
-    assert by_id["barnard"]["modes"]["epoch"]["enabled"] is True
-    assert by_id["wise0855"]["modes"]["epoch"]["enabled"] is False
-    assert "one epoch" in by_id["wise0855"]["modes"]["epoch"]["reason"].lower()
+    assert by_id["barnard"]["modes"]["survey_compare"]["enabled"] is True
+    assert by_id["wise0855"]["modes"]["survey_compare"]["enabled"] is False
+    assert (
+        "one survey epoch"
+        in by_id["wise0855"]["modes"]["survey_compare"]["reason"].lower()
+    )
     assert body["fixture"] is True
 
 
@@ -192,7 +195,8 @@ def test_target_detail_reports_epochs_pixel_scale_and_modes(
     assert body["epochs"][0]["release"] in {"dr1", "qr3"}
     assert body["pixel_scale_arcsec"] == pytest.approx(6.158)
     assert body["units"] == "MJy/sr"
-    assert body["modes"]["epoch"]["enabled"] is True
+    assert body["modes"]["survey_compare"]["enabled"] is True
+    assert body["modes"]["timeline"]["enabled"] is True
 
 
 def test_frames_returns_eight_by_two_planes_and_exactly_one_window(
@@ -250,7 +254,7 @@ def test_frames_refuses_a_target_with_only_one_epoch(client: TestClient) -> None
     response = client.get("/api/v1/targets/wise0855/frames?mode=epoch&bins=8")
 
     assert response.status_code == 409
-    assert "one epoch" in response.json()["detail"].lower()
+    assert "one survey epoch" in response.json()["detail"].lower()
 
 
 @pytest.mark.parametrize("query", ["mode=spectrum&bins=8", "mode=nope&bins=8"])

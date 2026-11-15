@@ -49,6 +49,7 @@ FIXTURE_SEARCHES: tuple[SearchSpec, ...] = (
     SearchSpec("wise0855", "spherex_dr1", "wise0855__spherex_dr1.csv"),
     SearchSpec("bamberga", "spherex_dr1", "bamberga__spherex_dr1.csv"),
     SearchSpec("lpv", "spherex_dr1_deep", "lpv__spherex_dr1_deep.csv", max_rows=400),
+    SearchSpec("lpv", "spherex_qr3_deep", "lpv__spherex_qr3_deep.csv"),
     SearchSpec("rdra", "spherex_dr1", "rdra__spherex_dr1.csv"),
     SearchSpec("rdra", "spherex_dr1_deep", "rdra__spherex_dr1_deep.csv"),
     SearchSpec("rdra", "spherex_qr3", "rdra__spherex_qr3.csv"),
@@ -73,6 +74,42 @@ FIXTURE_CUTOUTS: tuple[CutoutSpec, ...] = (
         "bamberga_dr1.fits",
         center=(305.2657, -29.3597),
         size_deg=0.1,
+    ),
+    CutoutSpec(
+        "bamberga",
+        "spherex_dr1",
+        "D1",
+        61152.856503,
+        "bamberga_dr1_b.fits",
+        center=(305.2657, -29.3597),
+        size_deg=0.1,
+    ),
+    CutoutSpec(
+        "lpv", "spherex_dr1_deep", "D4", 60790.28673, "lpv_d4_01.fits", size_deg=0.1
+    ),
+    CutoutSpec(
+        "lpv", "spherex_dr1_deep", "D4", 60852.652192, "lpv_d4_02.fits", size_deg=0.1
+    ),
+    CutoutSpec(
+        "lpv", "spherex_dr1_deep", "D4", 60955.428784, "lpv_d4_03.fits", size_deg=0.1
+    ),
+    CutoutSpec(
+        "lpv", "spherex_dr1_deep", "D4", 60981.91361, "lpv_d4_04.fits", size_deg=0.1
+    ),
+    CutoutSpec(
+        "lpv", "spherex_dr1_deep", "D4", 61051.716635, "lpv_d4_05.fits", size_deg=0.1
+    ),
+    CutoutSpec(
+        "lpv", "spherex_dr1_deep", "D4", 61078.537339, "lpv_d4_06.fits", size_deg=0.1
+    ),
+    CutoutSpec(
+        "lpv", "spherex_dr1_deep", "D4", 61113.292858, "lpv_d4_07.fits", size_deg=0.1
+    ),
+    CutoutSpec(
+        "lpv", "spherex_qr3_deep", "D4", 61192.457216, "lpv_d4_08.fits", size_deg=0.1
+    ),
+    CutoutSpec(
+        "lpv", "spherex_qr3_deep", "D4", 61283.75938, "lpv_d4_09.fits", size_deg=0.1
     ),
 )
 

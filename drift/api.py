@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -33,6 +33,8 @@ SAFE_FILENAME = re.compile(r"^[A-Za-z0-9_.-]+\.spx$")
 DEFAULT_BLINK_BINS = 8
 MAX_BLINK_BINS = 16
 BLINK_PLANE_BUDGET = 16
+DEFAULT_TIMELINE_VISITS = 8
+MIN_TIMELINE_VISITS = 2
 
 
 class HealthResponse(BaseModel):
@@ -116,6 +118,8 @@ def health_payload(settings: Settings) -> HealthResponse:
     if body["plane_count"] == 0:
         body["plane_count"] = sum(
             len(epoch.frames) for target in manifest.targets for epoch in target.epochs
+        ) or sum(
+            len(visit.frames) for target in manifest.targets for visit in target.visits
         )
     return HealthResponse.model_validate(body)
 
@@ -168,23 +172,120 @@ def _mode(enabled: bool, reason: str) -> dict[str, Any]:
     return {"enabled": enabled, "reason": reason}
 
 
+def _band_counts(target: Target) -> dict[int, list[Any]]:
+    """Count visits that carry each band."""
+    counts: dict[int, list[Any]] = {}
+    for visit in target.visits:
+        bands = {frame.band for frame in visit.frames if frame.band is not None}
+        for band in bands:
+            counts.setdefault(int(band), []).append(visit)
+    return counts
+
+
+def _band_sigma(target: Target, band: int) -> float:
+    values = [
+        frame.sigma
+        for visit in target.visits
+        for frame in visit.frames
+        if frame.band == band and frame.sigma is not None
+    ]
+    return sum(values) / len(values) if values else float("inf")
+
+
+def _resolve_band(target: Target, band: int | None) -> int | None:
+    if band is not None:
+        return band
+    if target.timeline and target.timeline.default_band is not None:
+        return target.timeline.default_band
+    counts = _band_counts(target)
+    if not counts:
+        return None
+    return max(
+        counts,
+        key=lambda item: (len(counts[item]), -_band_sigma(target, item), -item),
+    )
+
+
+def _stack(
+    target: Target, band: int | None
+) -> tuple[list[tuple[Any, Any]], str | None, list[str]]:
+    """Chronological (visit, frame) pairs at one band through one detector."""
+    if band is None:
+        return [], None, []
+    rows = sorted(
+        (
+            (visit, frame)
+            for visit in target.visits
+            for frame in visit.frames
+            if frame.band == band
+        ),
+        key=lambda item: (item[0].mjd or 0.0, item[0].visit_id),
+    )
+    if not rows:
+        return [], None, []
+
+    tally: dict[str, int] = {}
+    for visit, frame in rows:
+        detector = frame.detector or visit.detector or "unknown"
+        tally[detector] = tally.get(detector, 0) + 1
+    keep = max(tally, key=lambda item: (tally[item], item))
+    kept = [
+        (visit, frame)
+        for visit, frame in rows
+        if (frame.detector or visit.detector or "unknown") == keep
+    ]
+    refused = [
+        visit.visit_id
+        for visit, frame in rows
+        if (frame.detector or visit.detector or "unknown") != keep
+    ]
+    return kept, keep, refused
+
+
+def _timeline_bands(target: Target) -> list[int]:
+    return sorted(
+        band for band in _band_counts(target) if len(_stack(target, band)[0]) >= 2
+    )
+
+
+def _timeline_reason(target: Target, band: int | None) -> str:
+    if band is None:
+        return "No band is available for a visit timeline."
+    rows, _, _ = _stack(target, band)
+    if len(rows) < 2:
+        return (
+            f"Only {len(rows)} visit at band {band}; a timeline needs two. "
+            "Single visits are shown as a still, not a sequence."
+        )
+    return ""
+
+
 def _target_modes(target: Target) -> dict[str, dict[str, Any]]:
+    band = _resolve_band(target, None)
+    timeline = (
+        _mode(True, "")
+        if not _timeline_reason(target, band)
+        else _mode(False, _timeline_reason(target, band))
+    )
     if len(target.epochs) < 2:
-        epoch = _mode(
+        compare = _mode(
             False,
-            "Only one epoch is available; epoch comparison needs two surveys.",
+            "Only one survey epoch is available; survey compare needs two.",
         )
     elif not _shared_bands(target.epochs):
-        epoch = _mode(False, "No wavelengths are matched across two epochs.")
+        compare = _mode(False, "No wavelengths are matched across two epochs.")
     else:
-        epoch = _mode(True, "")
+        compare = _mode(True, "")
     spectrum = (
         _mode(True, "")
         if target.spectrum
         else _mode(False, "No spectrum is available for this target.")
     )
-    night_pair = _mode(False, "Night-pair motion is not available in this snapshot.")
-    return {"epoch": epoch, "night_pair": night_pair, "spectrum": spectrum}
+    return {
+        "timeline": timeline,
+        "survey_compare": compare,
+        "spectrum": spectrum,
+    }
 
 
 def _processing(manifest: Manifest) -> dict[str, Any]:
@@ -206,23 +307,31 @@ def _target_payload(
 ) -> dict[str, Any]:
     fixture = is_fixture_manifest(manifest)
     payload = target.model_dump(mode="json")
+    frames = sum(len(visit.frames) for visit in target.visits)
+    if frames == 0:
+        frames = sum(len(epoch.frames) for epoch in target.epochs)
+    band = target.timeline.default_band if target.timeline else None
     payload.update(
         {
             "snapshot_id": manifest.snapshot_id,
             "fixture": fixture,
             "epoch_count": len(target.epochs),
-            "frame_count": sum(len(epoch.frames) for epoch in target.epochs),
+            "visit_count": len(target.visits),
+            "frame_count": frames,
             "modes": _target_modes(target),
             "fixture_marked": fixture,
         }
     )
+    timeline = dict(payload.get("timeline") or {})
+    timeline["bands"] = _timeline_bands(target)
+    payload["timeline"] = timeline
     if detail:
         payload.update(_processing(manifest))
-        payload["window"] = (
-            manifest.window.model_dump(mode="json") if manifest.window else None
-        )
+        payload["window"] = _window_payload(manifest, target, band)
     else:
         payload.pop("epochs", None)
+        payload.pop("visits", None)
+        payload.pop("windows", None)
     return payload
 
 
@@ -235,31 +344,153 @@ def _thin(items: list[Any], count: int) -> list[Any]:
     return [items[index] for index in sorted(indexes)]
 
 
-def _window_payload(manifest: Manifest) -> dict[str, Any]:
-    if manifest.window is None:
+def _window_payload(
+    manifest: Manifest, target: Target | None = None, band: int | None = None
+) -> dict[str, Any]:
+    """Return the window for one band stack, falling back to the snapshot window."""
+    window = target.band_window(band) if target is not None else None
+    source = window or manifest.window
+    if source is None:
         raise HTTPException(status_code=503, detail="snapshot has no stretch window")
-    window = manifest.window.model_dump(mode="json")
-    if not window.get("sha256"):
-        window["sha256"] = window_sha256(manifest.window)
-    return window
+    payload = source.model_dump(mode="json")
+    if not payload.get("sha256"):
+        payload["sha256"] = window_sha256(payload)
+    return payload
+
+
+def _plane_payload(
+    manifest: Manifest, frame: Any, window_hash: str, index: int
+) -> dict[str, Any]:
+    filename = Path(frame.href or "").name
+    if not SAFE_FILENAME.fullmatch(filename):
+        raise HTTPException(
+            status_code=503,
+            detail=f"snapshot has an unsafe plane path for band {frame.band}",
+        )
+    lambda_um = float(frame.lambda_um or 0.0)
+    dlambda_um = float(frame.dlambda_um or 0.0)
+    processing = _processing(manifest)
+    return {
+        "index": index,
+        "band": frame.band,
+        "detector": frame.detector,
+        "lambda_um": lambda_um,
+        "lambda_lo_um": lambda_um - dlambda_um / 2.0,
+        "lambda_hi_um": lambda_um + dlambda_um / 2.0,
+        "dlambda_um": dlambda_um,
+        "width": processing["plane_px"],
+        "height": processing["plane_px"],
+        "dtype": "float16",
+        "href": f"/api/v1/snapshots/{manifest.snapshot_id}/planes/{filename}",
+        "static_href": f"/v1/{manifest.snapshot_id}/planes/{filename}",
+        "bytes": frame.bytes,
+        "sha256": frame.sha256,
+        "window_sha256": window_hash,
+    }
+
+
+def _timeline_frames(
+    manifest: Manifest, target: Target, band: int | None, requested: int
+) -> dict[str, Any]:
+    resolved = _resolve_band(target, band)
+    if resolved is None:
+        raise HTTPException(
+            status_code=409, detail="No band is available for a timeline."
+        )
+    rows, detector, refused = _stack(target, resolved)
+    reason = _timeline_reason(target, resolved)
+    if reason:
+        raise HTTPException(status_code=409, detail=reason)
+
+    selected = _thin(rows, min(requested, MAX_BLINK_BINS))
+    kept_ids = {visit.visit_id for visit, _ in selected}
+    omitted = [visit.visit_id for visit, _ in rows if visit.visit_id not in kept_ids]
+    window = _window_payload(manifest, target, resolved)
+    window_hash = str(window["sha256"])
+    processing = _processing(manifest)
+
+    planes: list[dict[str, Any]] = []
+    visits: list[dict[str, Any]] = []
+    for visit, frame in selected:
+        plane = _plane_payload(manifest, frame, window_hash, len(planes))
+        plane.update(
+            {
+                "visit_id": visit.visit_id,
+                "mjd": visit.mjd,
+                "date": visit.date,
+                "release": visit.release,
+                "survey": visit.survey,
+                "collection": visit.collection,
+                "obs_publisher_did": visit.obs_publisher_did,
+            }
+        )
+        planes.append(plane)
+        visits.append(
+            {
+                "visit_id": visit.visit_id,
+                "mjd": visit.mjd,
+                "date": visit.date,
+                "release": visit.release,
+                "survey": visit.survey,
+                "collection": visit.collection,
+                "obs_publisher_did": visit.obs_publisher_did,
+            }
+        )
+
+    mjds = [visit.mjd for visit, _ in selected if visit.mjd is not None]
+    return {
+        "snapshot_id": manifest.snapshot_id,
+        "fixture": is_fixture_manifest(manifest),
+        "target_id": target.id,
+        "mode": "timeline",
+        "band": resolved,
+        "detector": detector,
+        "default_band": target.timeline.default_band if target.timeline else None,
+        "visits_requested": requested,
+        "visits": len(selected),
+        "available_visits": len(rows),
+        "degraded": bool(omitted),
+        "frames_omitted": omitted,
+        "refused_frames": refused,
+        "span_days": (max(mjds) - min(mjds)) if len(mjds) > 1 else 0.0,
+        "visits_meta": visits,
+        "window": window,
+        "pixel_scale_arcsec": processing["pixel_scale_arcsec"],
+        "units": processing["units"],
+        "planes": planes,
+    }
 
 
 def frames_payload(
-    manifest: Manifest, target_id: str, mode: str, bins: int
+    manifest: Manifest,
+    target_id: str,
+    mode: str,
+    bins: int,
+    *,
+    band: int | None = None,
+    visits: int = DEFAULT_TIMELINE_VISITS,
+    reference: str | None = None,
 ) -> dict[str, Any]:
-    if mode != "epoch":
-        if mode in {"night_pair", "spectrum"}:
-            raise HTTPException(
-                status_code=409,
-                detail=f"mode {mode!r} is not available in this snapshot",
-            )
+    if mode == "timeline":
+        return _timeline_frames(manifest, _target(manifest, target_id), band, visits)
+    if mode in {"diff", "night_pair"}:
+        raise HTTPException(
+            status_code=409,
+            detail=f"mode {mode!r} is not available in this snapshot",
+        )
+    if mode == "spectrum":
+        raise HTTPException(
+            status_code=409,
+            detail="mode 'spectrum' is served by /spectrum, not /frames",
+        )
+    if mode not in {"epoch", "survey_compare"}:
         raise HTTPException(status_code=400, detail=f"unknown mode {mode!r}")
 
     target = _target(manifest, target_id)
     if len(target.epochs) < 2:
         raise HTTPException(
             status_code=409,
-            detail="Only one epoch is available; epoch comparison needs two surveys.",
+            detail="Only one survey epoch is available; survey compare needs two.",
         )
     epochs = sorted(
         target.epochs, key=lambda epoch: (epoch.mjd_min or 0.0, epoch.epoch_id)
@@ -272,37 +503,39 @@ def frames_payload(
         )
 
     by_band: list[tuple[int, Any]] = []
-    first_frames = {
-        frame.band: frame for frame in pair[0].frames if frame.band is not None
-    }
+    first_frames = {item.band: item for item in pair[0].frames if item.band is not None}
     for band in shared:
         frame = first_frames.get(band)
         if frame is not None:
             by_band.append((band, frame))
     by_band.sort(key=lambda item: (item[1].lambda_um or 0.0, item[0]))
     budget = max(1, BLINK_PLANE_BUDGET // len(pair))
-    selected = _thin(by_band, min(bins, budget))
+    selected: list[tuple[int, Any]] = _thin(by_band, min(bins, budget))
 
     window = _window_payload(manifest)
     window_hash = str(window["sha256"])
     processing = _processing(manifest)
     planes: list[dict[str, Any]] = []
-    for band_index, (band, reference) in enumerate(selected):
+    for band_index, item in enumerate(selected):
+        band = item[0]
+        band_reference: Any = item[1]
         for epoch in pair:
-            frame = next(
+            plane_frame: Any = next(
                 (item for item in epoch.frames if item.band == band),
                 None,
             )
-            if frame is None:
+            if plane_frame is None:
                 continue
-            filename = Path(frame.href or "").name
+            filename = Path(plane_frame.href or "").name
             if not SAFE_FILENAME.fullmatch(filename):
                 raise HTTPException(
                     status_code=503,
                     detail=f"snapshot has an unsafe plane path for band {band}",
                 )
-            lambda_um = float(frame.lambda_um or reference.lambda_um or 0.0)
-            dlambda_um = float(frame.dlambda_um or reference.dlambda_um or 0.0)
+            lambda_um = float(plane_frame.lambda_um or band_reference.lambda_um or 0.0)
+            dlambda_um = float(
+                plane_frame.dlambda_um or band_reference.dlambda_um or 0.0
+            )
             planes.append(
                 {
                     "index": len(planes),
@@ -324,8 +557,8 @@ def frames_payload(
                         f"/api/v1/snapshots/{manifest.snapshot_id}/planes/{filename}"
                     ),
                     "static_href": f"/v1/{manifest.snapshot_id}/planes/{filename}",
-                    "bytes": frame.bytes,
-                    "sha256": frame.sha256,
+                    "bytes": plane_frame.bytes,
+                    "sha256": plane_frame.sha256,
                     "window_sha256": window_hash,
                 }
             )
@@ -398,11 +631,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/v1/targets/{target_id}/frames")
     def target_frames(
         target_id: str,
-        mode: str = Query("epoch"),
+        response: Response,
+        mode: str = Query("timeline"),
         bins: int = Query(DEFAULT_BLINK_BINS, ge=1, le=MAX_BLINK_BINS),
+        band: int | None = Query(None, ge=0),
+        visits: int = Query(
+            DEFAULT_TIMELINE_VISITS, ge=MIN_TIMELINE_VISITS, le=MAX_BLINK_BINS
+        ),
+        reference: str | None = Query(None),
     ) -> dict[str, Any]:
         current = _current_manifest(resolved)
-        return frames_payload(current, target_id, mode, bins)
+        payload = frames_payload(
+            current,
+            target_id,
+            mode,
+            bins,
+            band=band,
+            visits=visits,
+            reference=reference,
+        )
+        if payload.get("degraded"):
+            response.headers["X-Spx-Degraded"] = "1"
+        else:
+            response.headers["X-Spx-Degraded"] = "0"
+        return payload
 
     @app.get("/api/v1/snapshots/{snapshot_id}/planes/{filename}")
     def snapshot_plane(snapshot_id: str, filename: str) -> FileResponse:

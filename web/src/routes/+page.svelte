@@ -26,7 +26,6 @@
   import {
     PlaneRenderer,
     RendererError,
-    type RenderMode,
     type RenderPreset,
   } from "$lib/PlaneRenderer";
   import {
@@ -45,12 +44,12 @@
     "Aeronautics and Space Administration.";
 
   const MODE_LABELS: Record<string, string> = {
-    epoch: "Epoch compare",
-    night_pair: "Night pair",
+    timeline: "Visit timeline",
+    survey_compare: "Survey compare",
     spectrum: "Spectrum",
   };
 
-  type ImageMode = "blink" | "difference";
+  type StageMode = "timeline" | "compare";
 
   interface AppState {
     kind: string;
@@ -64,10 +63,7 @@
     plane: DecodedPlane;
   }
 
-  interface BandPair {
-    a: PlaneEntry;
-    b: PlaneEntry;
-  }
+  const DEFAULT_VISITS = 8;
 
   let manifest = $state<ManifestSummary | null>(null);
   let targets = $state<TargetSummary[]>([]);
@@ -81,13 +77,14 @@
     title: "Loading",
     message: "Checking the published snapshot…",
   });
-  let mode = $state<ImageMode>("blink");
+  let stage = $state<StageMode>("timeline");
+  let difference = $state<boolean>(false);
   let preset = $state<RenderPreset>("linear");
   let fps = $state<number>(DEFAULT_FPS);
   let playing = $state<boolean>(true);
-  let bandIndex = $state<number>(0);
-  let bandCount = $state<number>(0);
-  let blinkFrame = $state<number>(0);
+  let bandValue = $state<number>(0);
+  let frameIndex = $state<number>(0);
+  let referenceIndex = $state<number>(0);
   let altText = $state<string>("No frame loaded.");
   let statusMessage = $state<string>("");
   let view = $state<ViewState>({ ra: 0, dec: 0, fov: DEFAULT_FOV });
@@ -97,7 +94,23 @@
   let blink: BlinkController | null = null;
   let uploadedKey = "";
 
-  const pair = $derived(bandPair(bandIndex));
+  const entries = $derived(
+    frames && decodedPlanes.length === frames.planes.length
+      ? frames.planes.map((meta, position) => ({
+          meta,
+          plane: decodedPlanes[position],
+        }))
+      : [],
+  );
+  const bands = $derived(detail?.timeline?.bands ?? []);
+  const backend = $derived(
+    stage === "timeline"
+      ? (detail?.modes.timeline ?? { enabled: false, reason: "No timeline." })
+      : (detail?.modes.survey_compare ?? {
+          enabled: false,
+          reason: "No survey compare.",
+        }),
+  );
   const modeRows = $derived(
     detail
       ? Object.entries(detail.modes).map(([key, value]) => ({
@@ -111,17 +124,15 @@
   const badgeState = $derived(
     manifest ? "ready" : appState.kind === "error" ? "error" : "loading",
   );
-
-  function bandPair(index: number): BandPair | null {
-    if (!frames || decodedPlanes.length !== frames.planes.length) return null;
-    const entries = frames.planes.map((meta, position) => ({
-      meta,
-      plane: decodedPlanes[position],
-    }));
-    const group = entries.filter((entry) => entry.meta.band_index === index);
-    if (group.length < 2) return null;
-    return { a: group[0], b: group[1] };
-  }
+  const compareGroup = $derived(
+    stage === "compare" && frames
+      ? frames.planes
+          .map((meta, position) => ({ meta, plane: decodedPlanes[position] }))
+          .filter((entry) => entry.meta.band_index === bandValue)
+      : [],
+  );
+  const strip = $derived(stage === "timeline" ? entries : compareGroup);
+  const stripIndex = $derived(stage === "timeline" ? frameIndex : frameIndex);
 
   function separationDeg(ra1: number, dec1: number, ra2: number, dec2: number): number {
     const radians = Math.PI / 180;
@@ -148,6 +159,24 @@
     return `${parsed.toISOString().slice(0, 16).replace("T", " ")} UTC`;
   }
 
+  function formatDate(value: string | null | undefined): string {
+    if (!value) return "date unknown";
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.valueOf())) return value;
+    return `${parsed.toISOString().slice(0, 16).replace("T", " ")}Z`;
+  }
+
+  function shortDate(value: string | null | undefined): string {
+    if (!value) return "—";
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.valueOf())) return value;
+    return parsed.toISOString().slice(0, 10);
+  }
+
+  function formatMjd(value: number | null | undefined): string {
+    return value === null || value === undefined ? "MJD —" : `MJD ${value.toFixed(3)}`;
+  }
+
   function formatLambda(meta: PlaneMeta | undefined): string {
     if (!meta) return "—";
     return `${meta.lambda_lo_um.toFixed(2)}–${meta.lambda_hi_um.toFixed(2)} µm`;
@@ -165,27 +194,41 @@
     return target.name ?? target.id;
   }
 
-  function epochText(meta: PlaneMeta | undefined): string {
+  function releaseText(meta: PlaneMeta | undefined): string {
     if (!meta) return "—";
-    return `${meta.release.toUpperCase()} · ${meta.epoch_id}`;
+    return meta.release.toUpperCase();
   }
 
-  function currentMeta(): PlaneMeta | undefined {
-    if (!pair) return undefined;
-    if (mode === "difference") return pair.a.meta;
-    return blinkFrame === 0 ? pair.a.meta : pair.b.meta;
+  function visitLabel(meta: PlaneMeta | undefined): string {
+    if (!meta) return "—";
+    if (meta.visit_id) return meta.visit_id;
+    return meta.epoch_id ?? "—";
+  }
+
+  function currentEntry(): PlaneEntry | undefined {
+    if (stage === "timeline") return entries[frameIndex];
+    return compareGroup[frameIndex];
+  }
+
+  function referenceEntry(): PlaneEntry | undefined {
+    if (stage === "timeline") return entries[referenceIndex] ?? entries[0];
+    return compareGroup[0];
   }
 
   function panelLabel(): string {
-    if (!pair) return "No image loaded";
-    if (mode === "difference") {
+    const meta = currentEntry()?.meta;
+    if (!meta) return "No image loaded";
+    if (difference) {
       return (
-        `Difference image ${pair.b.meta.epoch_id} minus ${pair.a.meta.epoch_id}, ` +
-        `${formatLambda(pair.a.meta)}, ${scaleText()}, ${unitsText()}`
+        `Difference image: ${visitLabel(meta)} minus ${visitLabel(referenceEntry()?.meta)}, ` +
+        `${formatLambda(meta)}, ${scaleText()}, ${unitsText()}`
       );
     }
-    const meta = currentMeta();
-    return `${meta?.epoch_id ?? "epoch"}, ${formatLambda(meta)}, ${scaleText()}, ${unitsText()}`;
+    return (
+      `Visit ${visitLabel(meta)} on ${formatDate(meta.date)}, ` +
+      `${releaseText(meta)} ${meta.detector ?? ""}, ${formatLambda(meta)}, ` +
+      `${scaleText()}, ${unitsText()}`
+    );
   }
 
   function errorState(error: unknown): AppState {
@@ -227,7 +270,8 @@
     rendererA?.dispose();
     rendererA = null;
     uploadedKey = "";
-    blinkFrame = 0;
+    frameIndex = 0;
+    referenceIndex = 0;
   }
 
   function setupRenderers(): boolean {
@@ -248,28 +292,78 @@
     }
   }
 
+  function frameCount(): number {
+    if (stage === "timeline") return entries.length;
+    return compareGroup.length;
+  }
+
   function initBlink(): void {
     blink?.destroy();
-    blink = new BlinkController(2, fps);
-    blink.playing = playing;
+    blink = new BlinkController(Math.max(1, frameCount()), fps);
+    blink.playing = playing && !difference;
     blink.onFrame((frame) => {
-      if (mode !== "blink") return;
-      blinkFrame = frame;
+      if (difference) return;
+      frameIndex = frame;
       drawFrame();
     });
     blink.start();
   }
 
   function drawFrame(force = false): void {
-    if (!frames || !rendererA || !pair) return;
-    const difference = mode === "difference";
-    const key = difference ? `${bandIndex}:difference` : `${bandIndex}:${blinkFrame}`;
+    if (!frames || !rendererA) return;
+    if (stage === "timeline") {
+      const entry = entries[frameIndex];
+      if (!entry) return;
+      const key = `timeline:${difference ? "diff" : frameIndex}:${bandValue}`;
+      if (force || uploadedKey !== key) {
+        if (difference) {
+          const reference = referenceEntry();
+          if (!reference) return;
+          rendererA.setPlane(reference.plane, 0);
+          rendererA.setPlane(entry.plane, 1);
+        } else {
+          rendererA.setPlane(entry.plane, 0);
+        }
+        uploadedKey = key;
+      }
+      rendererA.setWindow(frames.window);
+      rendererA.setPreset(preset);
+      rendererA.setMode(difference ? "difference" : "single");
+      rendererA.draw();
+
+      const meta = entry.meta;
+      if (difference) {
+        const reference = referenceEntry()?.meta;
+        statusMessage =
+          `Difference: ${visitLabel(meta)} − ${visitLabel(reference)} · ` +
+          `${formatLambda(meta)} · one window for the whole stack`;
+        altText =
+          `Difference image: visit ${visitLabel(meta)} on ${formatDate(meta.date)} ` +
+          `minus reference ${visitLabel(reference)} on ${formatDate(reference?.date)}. ` +
+          `${formatLambda(meta)}, ${scaleText()}, ${unitsText()}. ` +
+          "Blue means brighter in the current visit, amber means fainter, magenta marks missing pixels. Every frame in the stack shares one stretch window.";
+      } else {
+        statusMessage =
+          `Visit ${frameIndex + 1} of ${entries.length} · ${formatDate(meta.date)} · ` +
+          `${formatMjd(meta.mjd)} · ${releaseText(meta)} · ${formatLambda(meta)}`;
+        altText =
+          `Visit ${frameIndex + 1} of ${entries.length}: ${formatDate(meta.date)}, ` +
+          `${formatMjd(meta.mjd)}, release ${releaseText(meta)}, detector ${meta.detector ?? "unknown"}, ` +
+          `${formatLambda(meta)}, ${scaleText()}, ${unitsText()}. ` +
+          "Frames play in date order at the selected speed and share one stretch window.";
+      }
+      return;
+    }
+
+    const group = compareGroup;
+    if (group.length < 2) return;
+    const entry = group[Math.min(frameIndex, group.length - 1)];
+    const key = `compare:${difference ? "diff" : frameIndex}:${bandValue}`;
     if (force || uploadedKey !== key) {
       if (difference) {
-        rendererA.setPlane(pair.a.plane, 0);
-        rendererA.setPlane(pair.b.plane, 1);
+        rendererA.setPlane(group[0].plane, 0);
+        rendererA.setPlane(group[1].plane, 1);
       } else {
-        const entry = blinkFrame === 0 ? pair.a : pair.b;
         rendererA.setPlane(entry.plane, 0);
       }
       uploadedKey = key;
@@ -278,50 +372,17 @@
     rendererA.setPreset(preset);
     rendererA.setMode(difference ? "difference" : "single");
     rendererA.draw();
-
-    const meta = currentMeta();
-    if (difference) {
-      statusMessage =
-        `Difference ${pair.b.meta.epoch_id} − ${pair.a.meta.epoch_id} · ` +
-        `${formatLambda(pair.a.meta)} · one shared window`;
-      altText =
-        `Difference image: ${pair.b.meta.epoch_id} minus ${pair.a.meta.epoch_id}, ` +
-        `${formatLambda(pair.a.meta)}, ${scaleText()}, ${unitsText()}. ` +
-        "Blue means brighter in the second epoch, amber means fainter, magenta marks missing pixels. Both epochs use the same single stretch window.";
-    } else {
-      statusMessage =
-        `Epoch ${blinkFrame + 1} of 2 · ${epochText(meta)} · ` +
-        `${formatLambda(meta)} · blinking DR1 ↔ QR3`;
-      altText =
-        `Blink frame ${blinkFrame + 1} of 2: ${meta?.epoch_id}, ` +
-        `${formatLambda(meta)}, ${scaleText()}, ${unitsText()}. ` +
-        "The two matched epochs alternate at the selected speed and share one stretch window.";
-    }
+    statusMessage = difference
+      ? `Difference ${visitLabel(group[1].meta)} − ${visitLabel(group[0].meta)} · ${formatLambda(group[0].meta)}`
+      : `Survey compare ${frameIndex + 1} of 2 · ${releaseText(entry.meta)} · ${formatLambda(entry.meta)}`;
+    altText = difference
+      ? `Difference image of the two survey epochs at ${formatLambda(group[0].meta)}, ${scaleText()}, ${unitsText()}.`
+      : `Survey compare frame ${frameIndex + 1} of 2: ${releaseText(entry.meta)}, ${formatLambda(entry.meta)}, ${scaleText()}, ${unitsText()}.`;
   }
 
   function setFpsValue(value: number): void {
     fps = Math.min(MAX_FPS, Math.max(MIN_FPS, Math.round(value)));
     blink?.setFps(fps);
-  }
-
-  function setBandValue(value: number): void {
-    const maximum = Math.max(1, bandCount);
-    bandIndex = Math.min(Math.max(1, Math.round(value)), maximum) - 1;
-    uploadedKey = "";
-    drawFrame(true);
-  }
-
-  function setModeValue(next: ImageMode): void {
-    mode = next;
-    uploadedKey = "";
-    if (next === "difference") {
-      playing = false;
-      if (blink) blink.playing = false;
-    } else {
-      playing = true;
-      if (blink) blink.playing = true;
-    }
-    drawFrame(true);
   }
 
   function setPresetValue(next: RenderPreset): void {
@@ -332,9 +393,43 @@
   }
 
   function togglePlayback(): void {
-    if (mode !== "blink") return;
+    if (difference) return;
     playing = !playing;
     if (blink) blink.playing = playing;
+  }
+
+  function goTo(index: number): void {
+    frameIndex = Math.max(0, Math.min(index, frameCount() - 1));
+    playing = false;
+    if (blink) {
+      blink.playing = false;
+      blink.goTo(frameIndex);
+    }
+    drawFrame(true);
+    shareView();
+  }
+
+  function setDifference(next: boolean): void {
+    difference = next;
+    if (next) {
+      playing = false;
+      if (blink) blink.playing = false;
+    }
+    uploadedKey = "";
+    drawFrame(true);
+  }
+
+  async function setBandValue(band: number): Promise<void> {
+    if (!detail || stage !== "timeline") return;
+    bandValue = band;
+    await loadFrames(detail.id, band);
+  }
+
+  async function setStage(next: StageMode): Promise<void> {
+    if (!detail || next === stage) return;
+    stage = next;
+    difference = false;
+    await loadFrames(detail.id, stage === "timeline" ? bandValue : null);
   }
 
   function onKeydown(event: KeyboardEvent): void {
@@ -347,60 +442,109 @@
     togglePlayback();
   }
 
-  async function loadTarget(id: string, fov = view.fov): Promise<void> {
+  function shareView(): void {
+    view = {
+      ...view,
+      band: stage === "timeline" ? bandValue : undefined,
+      visit: stage === "timeline" ? frameIndex : undefined,
+    };
+    writeShareState(view);
+  }
+
+  async function loadFrames(id: string, band: number | null): Promise<void> {
     teardownRenderers();
     frames = null;
     decodedPlanes = [];
-    bandCount = 0;
-    bandIndex = 0;
     appState = {
       kind: "loading",
       title: "Loading",
-      message: "Fetching matched planes and checking the shared stretch window…",
+      message: "Fetching the visit stack and its shared stretch window…",
     };
     try {
-      const target = await fetchTarget(id);
-      detail = target;
-      selectedId = id;
-      view = {
-        ra: target.ra ?? 0,
-        dec: target.dec ?? 0,
-        fov: fov,
-      };
-      writeShareState(view);
-
-      if (!target.modes.epoch?.enabled) {
-        appState = {
-          kind: "one-epoch",
-          title: "Epoch comparison unavailable",
-          message:
-            target.modes.epoch?.reason ??
-            "This target does not have two comparable epochs.",
-        };
-        return;
-      }
-
-      const response = await fetchFrames(id, 8);
+      const response =
+        stage === "timeline"
+          ? await fetchFrames(id, {
+              mode: "timeline",
+              band,
+              visits: DEFAULT_VISITS,
+            })
+          : await fetchFrames(id, { mode: "epoch", bins: 8 });
       const buffers = await Promise.all(
         response.planes.map((plane) => fetchPlane(plane.href)),
       );
       const planes = buffers.map((buffer) => decodeSpx1(buffer));
       frames = response;
       decodedPlanes = planes;
-      bandCount = response.bins;
-      bandIndex = 0;
+      bandValue =
+        stage === "timeline"
+          ? (response.band ?? band ?? detail?.timeline?.default_band ?? 0)
+          : 0;
+      frameIndex =
+        stage === "timeline"
+          ? Math.min(view.visit ?? 0, response.planes.length - 1)
+          : 0;
+      referenceIndex = 0;
       await tick();
       if (!setupRenderers()) return;
       appState = { kind: "ready", title: "Ready", message: "" };
       uploadedKey = "";
-      blinkFrame = 0;
+      playing = view.visit === undefined;
       initBlink();
+      blink?.goTo(frameIndex);
       drawFrame(true);
+      shareView();
     } catch (error) {
       teardownRenderers();
       frames = null;
       decodedPlanes = [];
-      bandCount = 0;
+      appState = errorState(error);
+    }
+  }
+
+  async function loadTarget(id: string, fov = view.fov): Promise<void> {
+    teardownRenderers();
+    frames = null;
+    decodedPlanes = [];
+    appState = {
+      kind: "loading",
+      title: "Loading",
+      message: "Fetching visits and checking mode eligibility…",
+    };
+    try {
+      const target = await fetchTarget(id);
+      detail = target;
+      selectedId = id;
+      // Keep the shared band and frame: they are what a shared URL pins.
+      const sharedBand = view.band;
+      const sharedVisit = view.visit;
+      view = {
+        ra: target.ra ?? 0,
+        dec: target.dec ?? 0,
+        fov: fov,
+        ...(sharedBand === undefined ? {} : { band: sharedBand }),
+        ...(sharedVisit === undefined ? {} : { visit: sharedVisit }),
+      };
+      writeShareState(view);
+
+      if (!target.modes.timeline?.enabled) {
+        stage = "timeline";
+        appState = {
+          kind: "one-epoch",
+          title: "Visit timeline unavailable",
+          message:
+            target.modes.timeline?.reason ??
+            "This target does not have two visits at one band.",
+        };
+        return;
+      }
+      stage = "timeline";
+      difference = false;
+      bandValue = view.band ?? target.timeline?.default_band ?? 0;
+      await loadFrames(id, bandValue);
+    } catch (error) {
+      teardownRenderers();
+      frames = null;
+      decodedPlanes = [];
       appState = errorState(error);
     }
   }
@@ -426,7 +570,7 @@
 
       const shared = parseShareState(window.location.search);
       let chosen =
-        targets.find((target) => target.modes.epoch?.enabled) ?? targets[0];
+        targets.find((target) => target.modes.timeline?.enabled) ?? targets[0];
 
       if (shared) {
         view = shared;
@@ -452,6 +596,7 @@
           return;
         }
         chosen = match;
+        if (shared.band) bandValue = shared.band;
       } else if (chosen) {
         view = {
           ra: chosen.ra ?? 0,
@@ -477,6 +622,8 @@
   function onTargetChange(): void {
     const target = targets.find((item) => item.id === selectedId);
     if (!target) return;
+    // A band and a frame belong to one target's stack; never carry them across.
+    view = { ra: view.ra, dec: view.dec, fov: view.fov };
     void loadTarget(target.id, view.fov);
   }
 
@@ -528,29 +675,57 @@
   <div class="layout">
     <section class="stage" aria-labelledby="stage-title">
       <div class="stage-header">
-        <h2 id="stage-title">Matched-wavelength epoch comparison</h2>
-        {#if frames}
+        <h2 id="stage-title">Matched-wavelength visit timeline</h2>
+        {#if frames && stage === "timeline"}
           <span class="note">
-            {frames.bins} bands × {frames.epochs.length} epochs · one shared window
+            {frames.visits ?? entries.length} visits · band {frames.band} ·
+            {frames.detector ?? "detector"} · one window
+          </span>
+        {:else if frames}
+          <span class="note">
+            {frames.bins ?? 0} bands × {frames.epochs?.length ?? 0} epochs · one
+            window
           </span>
         {/if}
       </div>
       <p class="lede">
-        Wavelengths are matched before any comparison. The two matched epochs
-        share one ingest-computed stretch window, the same pixel scale, and the
-        same units, so a blink cannot flatter one epoch. Motion below one pixel
-        is measured, not seen.
+        Wavelengths are matched before any comparison, and every frame in a stack
+        comes from one detector. Visits play in date order and share one
+        ingest-computed stretch window, the same pixel scale, and the same units,
+        so playback cannot flatter one visit. Motion below one pixel is measured,
+        not seen.
       </p>
 
       {#if manifest?.fixture}
         <p class="fixture-warning" role="note">
-          Synthetic fixture snapshot — not archive data. It exists to exercise the
-          API and renderer, and the production publish path refuses it without an
-          explicit flag.
+          Fixture snapshot — synthetic pixels, not archive data. It exists to
+          exercise the API and renderer, and the production publish path refuses
+          it without an explicit flag.
         </p>
       {/if}
 
-      {#if pair}
+      {#if frames && strip.length}
+        <div class="mode-tabs" role="tablist" aria-label="Image mode">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={stage === "timeline"}
+            disabled={!detail?.modes.timeline?.enabled}
+            onclick={() => void setStage("timeline")}
+          >
+            Visit timeline
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={stage === "compare"}
+            disabled={!detail?.modes.survey_compare?.enabled}
+            onclick={() => void setStage("compare")}
+          >
+            Survey compare
+          </button>
+        </div>
+
         <div class="image-grid">
           <figure class="image-panel" data-panel="image">
             <canvas
@@ -562,22 +737,63 @@
             ></canvas>
             <figcaption>
               <strong>
-                {mode === "difference"
-                  ? `${pair.b.meta.epoch_id} − ${pair.a.meta.epoch_id}`
-                  : epochText(currentMeta())}
+                {difference
+                  ? `${visitLabel(currentEntry()?.meta)} − ${visitLabel(referenceEntry()?.meta)}`
+                  : formatDate(currentEntry()?.meta?.date)}
               </strong>
-              <span>λ {formatLambda(currentMeta())}</span>
+              <span>{difference ? "difference" : formatMjd(currentEntry()?.meta?.mjd)}</span>
+              <span>{releaseText(currentEntry()?.meta)}</span>
+              <span>detector {currentEntry()?.meta?.detector ?? "—"}</span>
+              <span>λ {formatLambda(currentEntry()?.meta)}</span>
               <span>{scaleText()}</span>
               <span>{unitsText()}</span>
               <span>
-                {mode === "difference"
-                  ? "difference"
-                  : `blink · epoch ${blinkFrame + 1}/2`}
+                {difference
+                  ? `against ${formatDate(referenceEntry()?.meta?.date)}`
+                  : `visit ${frameIndex + 1}/${strip.length}`}
               </span>
             </figcaption>
           </figure>
         </div>
         <p class="status" role="status" aria-live="polite">{statusMessage}</p>
+
+        <section aria-label="Visit filmstrip">
+          <ol class="filmstrip">
+            {#each strip as entry, index (entry.meta.visit_id ?? entry.meta.index)}
+              <li>
+                <button
+                  type="button"
+                  aria-pressed={index === stripIndex}
+                  aria-label={`Frame ${index + 1}: ${entry.meta.visit_id ?? entry.meta.epoch_id ?? "frame"}, ${formatDate(entry.meta.date)}, ${formatMjd(entry.meta.mjd ?? entry.meta.mjd_min)}, ${releaseText(entry.meta)}`}
+                  onclick={() => goTo(index)}
+                >
+                  <span class="tick">{index + 1}</span>
+                  <span class="date">
+                    {entry.meta.date
+                      ? shortDate(entry.meta.date)
+                      : (entry.meta.epoch_id ?? "—")}
+                  </span>
+                  <span class="mjd">{formatMjd(entry.meta.mjd ?? entry.meta.mjd_min)}</span>
+                  <span class="release">{releaseText(entry.meta)}</span>
+                </button>
+              </li>
+            {/each}
+          </ol>
+          <p class="note">
+            {#if stage === "timeline"}
+              {#if frames.degraded}
+                Degraded: {frames.frames_omitted?.length ?? 0}
+                {(frames.frames_omitted?.length ?? 0) === 1 ? "visit" : "visits"}
+                omitted, thinned evenly over MJD.
+              {:else}
+                {frames.visits ?? entries.length} of
+                {frames.available_visits ?? entries.length} available visits shown.
+              {/if}
+            {:else}
+              Two survey epochs, matched on measured wavelength.
+            {/if}
+          </p>
+        </section>
       {:else}
         <StateView
           state={appState.kind}
@@ -591,14 +807,16 @@
 
       <section class="provenance" aria-label="Provenance">
         <p>
-          Epoch
-          <strong>
-            {pair
-              ? `${pair.a.meta.release.toUpperCase()} ↔ ${pair.b.meta.release.toUpperCase()}`
-              : "—"}
-          </strong>
+          Visit
+          <strong>{currentEntry()?.meta?.visit_id ?? "—"}</strong>
+          {formatDate(currentEntry()?.meta?.date)}
         </p>
-        <p>λ <strong>{pair ? formatLambda(pair.a.meta) : "—"}</strong> matched</p>
+        <p>{formatMjd(currentEntry()?.meta?.mjd)}</p>
+        <p>
+          Release <strong>{releaseText(currentEntry()?.meta)}</strong> · detector
+          <strong>{currentEntry()?.meta?.detector ?? "—"}</strong>
+        </p>
+        <p>λ <strong>{formatLambda(currentEntry()?.meta)}</strong> matched</p>
         <p>Pixel scale <strong>{scaleText()}</strong></p>
         <p>Units <strong>{unitsText()}</strong></p>
         <p>
@@ -607,9 +825,9 @@
         </p>
       </section>
 
-      <section class="controls" aria-label="Blink and stretch controls">
+      <section class="controls" aria-label="Playback and stretch controls">
         <div>
-          <label for="fps">Blink speed <output>{fps} fps</output></label>
+          <label for="fps">Playback speed <output>{fps} fps</output></label>
           <input
             id="fps"
             type="range"
@@ -619,7 +837,7 @@
             value={fps}
             aria-valuetext={`${fps} frames per second`}
             oninput={(event) => setFpsValue(Number(event.currentTarget.value))}
-            disabled={!pair || mode === "difference"}
+            disabled={!strip.length || difference}
           />
         </div>
         <div>
@@ -627,59 +845,43 @@
             type="button"
             onclick={togglePlayback}
             aria-pressed={playing}
-            disabled={!pair || mode === "difference"}
+            disabled={!strip.length || difference}
           >
-            {mode === "difference"
-              ? "Blink paused"
-              : playing
-                ? "Pause blink"
-                : "Play blink"}
+            {difference ? "Paused for difference" : playing ? "Pause" : "Play"}
+          </button>
+          <button
+            type="button"
+            aria-pressed={difference}
+            onclick={() => setDifference(!difference)}
+            disabled={!strip.length || frameIndex === referenceIndex}
+            title={frameIndex === referenceIndex
+              ? "This frame is the difference reference; choose another visit."
+              : "Compare this frame with the reference visit."}
+          >
+            Difference
           </button>
           <p class="note">
-            Space toggles the epoch blink when focus is not in a control.
+            Space toggles playback when focus is not in a control. Difference
+            compares the current visit with a reference visit from the same stack;
+            it is disabled while the current frame is that reference.
           </p>
         </div>
         <div>
           <label for="band">
             Wavelength band
-            <output>
-              {bandIndex + 1}/{bandCount || 1} ·
-              {formatLambda(pair ? pair.a.meta : undefined)}
-            </output>
+            <output>{frames?.band ?? bandValue}</output>
           </label>
-          <input
+          <select
             id="band"
-            type="range"
-            min="1"
-            max={Math.max(1, bandCount)}
-            step="1"
-            value={bandIndex + 1}
-            aria-valuetext={`Band ${bandIndex + 1} of ${bandCount || 1}`}
-            oninput={(event) => setBandValue(Number(event.currentTarget.value))}
-            disabled={!pair}
-          />
+            value={String(bandValue)}
+            onchange={(event) => void setBandValue(Number(event.currentTarget.value))}
+            disabled={!strip.length || stage !== "timeline" || bands.length < 2}
+          >
+            {#each bands as band (band)}
+              <option value={String(band)}>Band {band}</option>
+            {/each}
+          </select>
         </div>
-        <fieldset>
-          <legend>Mode</legend>
-          <div class="mode-buttons">
-            <button
-              type="button"
-              aria-pressed={mode === "blink"}
-              onclick={() => setModeValue("blink")}
-              disabled={!pair}
-            >
-              Blink
-            </button>
-            <button
-              type="button"
-              aria-pressed={mode === "difference"}
-              onclick={() => setModeValue("difference")}
-              disabled={!pair}
-            >
-              Difference
-            </button>
-          </div>
-        </fieldset>
         <div>
           <label for="preset">Stretch preset</label>
           <select
@@ -687,7 +889,7 @@
             value={preset}
             onchange={(event) =>
               setPresetValue(event.currentTarget.value as RenderPreset)}
-            disabled={!pair}
+            disabled={!strip.length}
           >
             <option value="linear">Linear</option>
             <option value="asinh">Asinh</option>
@@ -695,8 +897,8 @@
           </select>
         </div>
         <p class="note">
-          Linear, asinh and log all derive from the single snapshot window
-          (lo, hi, s); changing preset never recomputes the window.
+          Linear, asinh and log all derive from this band's single window (lo, hi,
+          s); changing preset never recomputes the window.
         </p>
       </section>
     </section>
@@ -725,6 +927,19 @@
             <dd>{detail.ra === null ? "—" : `${detail.ra.toFixed(5)}°`}</dd>
             <dt>Dec</dt>
             <dd>{detail.dec === null ? "—" : `${detail.dec.toFixed(5)}°`}</dd>
+            <dt>Default band</dt>
+            <dd>
+              {detail.timeline?.default_band ?? "—"} · detector
+              {detail.timeline?.default_detector ?? "—"}
+            </dd>
+            <dt>Visits</dt>
+            <dd>
+              {detail.timeline?.visits ?? 0} at the default band · span
+              {detail.timeline?.span_days === null ||
+              detail.timeline?.span_days === undefined
+                ? "—"
+                : `${detail.timeline.span_days.toFixed(2)} d`}
+            </dd>
             <dt>Epochs</dt>
             <dd>
               {detail.epochs
@@ -785,10 +1000,14 @@
           <dd>{view.dec.toFixed(5)}°</dd>
           <dt>FOV</dt>
           <dd>{view.fov.toFixed(2)}°</dd>
+          <dt>Band</dt>
+          <dd>{view.band ?? "—"}</dd>
+          <dt>Visit</dt>
+          <dd>{view.visit === undefined ? "—" : view.visit + 1}</dd>
         </dl>
         <p class="note">
-          The URL query <code>?ra=&amp;dec=&amp;fov=</code> restores this view on
-          reload and can be shared.
+          The URL query <code>?ra=&amp;dec=&amp;fov=&amp;band=&amp;visit=</code>
+          restores this view, down to the frame, on reload and can be shared.
         </p>
       </div>
     </aside>

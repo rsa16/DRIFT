@@ -37,8 +37,15 @@ class Window(_Model):
     sha256: str | None = None
 
 
+class BandWindow(Window):
+    """One stretch window per band stack, shared by every frame in that stack."""
+
+    band: int | None = None
+
+
 class Frame(_Model):
     band: int | None = None
+    detector: str | None = None
     lambda_um: float | None = None
     dlambda_um: float | None = None
     obs_publisher_did: str | None = None
@@ -51,6 +58,28 @@ class Frame(_Model):
     saturated: bool | None = None
 
 
+class Visit(_Model):
+    """One exposure of the field through one detector: the unit a timeline steps."""
+
+    visit_id: str
+    mjd: float | None = None
+    date: str | None = None
+    release: str | None = None
+    survey: int | None = None
+    collection: str | None = None
+    obs_publisher_did: str | None = None
+    detector: str | None = None
+    frames: list[Frame] = Field(default_factory=list)
+
+
+class Timeline(_Model):
+    default_band: int | None = None
+    default_detector: str | None = None
+    visits: int = 0
+    span_days: float | None = None
+    band_reason: str | None = None
+
+
 class Epoch(_Model):
     epoch_id: str
     survey: int | None = None
@@ -58,6 +87,7 @@ class Epoch(_Model):
     mjd_min: float | None = None
     mjd_max: float | None = None
     frames: list[Frame] = Field(default_factory=list)
+    visit_ids: list[str] = Field(default_factory=list)
 
 
 class Target(_Model):
@@ -66,9 +96,19 @@ class Target(_Model):
     dec: float | None = None
     pm: list[float] | None = None
     stale: bool | None = None
+    visits: list[Visit] = Field(default_factory=list)
     epochs: list[Epoch] = Field(default_factory=list)
+    timeline: Timeline | None = None
+    windows: list[BandWindow] = Field(default_factory=list)
     spectrum: dict[str, Any] | None = None
     labels: list[str] = Field(default_factory=list)
+
+    def band_window(self, band: int | None) -> BandWindow | None:
+        """Return the window for ``band``, falling back to the target's first."""
+        for window in self.windows:
+            if band is not None and window.band == band:
+                return window
+        return None
 
 
 class FileEntry(_Model):
