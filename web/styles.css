@@ -1,0 +1,157 @@
+:root {
+  color-scheme: light;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  line-height: 1.5;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  display: flex;
+  min-height: 100vh;
+  flex-direction: column;
+  margin: 0;
+  background: #fff;
+  color: #111;
+}
+
+.skip-link {
+  position: absolute;
+  left: -999px;
+  top: 0;
+  padding: 0.5rem 0.75rem;
+  background: #fff;
+  color: #111;
+  border: 1px solid #111;
+}
+
+.skip-link:focus {
+  left: 0.75rem;
+  top: 0.75rem;
+}
+
+.site-header,
+.site-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid #ccc;
+}
+
+.site-footer {
+  border-top: 1px solid #ccc;
+  border-bottom: 0;
+  color: #555;
+  font-size: 0.875rem;
+}
+
+.site-footer p {
+  margin: 0;
+}
+
+.brand {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  align-items: baseline;
+}
+
+.brand h1 {
+  margin: 0;
+  font-size: 1.25rem;
+  letter-spacing: 0.05em;
+}
+
+.brand p {
+  margin: 0;
+  color: #555;
+  font-size: 0.875rem;
+}
+
+.badge {
+  margin: 0;
+  color: #555;
+  font-size: 0.875rem;
+}
+
+.badge[data-state="ready"] {
+  color: #1d5c3a;
+}
+
+.badge[data-state="error"] {
+  color: #8a1c1c;
+}
+
+main {
+  display: flex;
+  align-items: center;
+  max-width: 60rem;
+  margin: 0 auto;
+  flex-grow: 2;
+  padding: 2rem 1.5rem;
+}
+
+#stage {
+  border: 1px solid #ccc;
+  padding: 1.5rem;
+  height: fit-content;
+}
+
+#stage h2 {
+  margin-top: 0;
+  font-size: 1.25rem;
+}
+
+.lede {
+  max-width: 50rem;
+  color: #333;
+}
+
+.state {
+  margin-top: 1.5rem;
+  padding-left: 1rem;
+  border-left: 3px solid #999;
+}
+
+.state h3 {
+  margin: 0 0 0.25rem;
+  font-size: 1rem;
+}
+
+.state p {
+  margin: 0;
+  color: #333;
+}
+
+.state button {
+  margin-top: 0.75rem;
+  padding: 0.4rem 0.8rem;
+  border: 1px solid #777;
+  background: #f4f4f4;
+  color: #111;
+  font: inherit;
+  cursor: pointer;
+}
+
+a {
+  color: #005ea8;
+}
+
+a:focus-visible,
+button:focus-visible {
+  outline: 2px solid #111;
+  outline-offset: 2px;
+}
+
+@media (max-width: 40rem) {
+  .site-header,
+  .site-footer {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

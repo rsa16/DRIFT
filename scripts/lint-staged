@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+mapfile -t staged < <(
+  git diff --cached --name-only --diff-filter=ACMR -- '*.py' | grep -v '^\.scratch/' || true
+)
+
+if [ "${#staged[@]}" -eq 0 ]; then
+  exit 0
+fi
+
+mapfile -t unstaged < <(git diff --name-only -- '*.py' || true)
+
+for file in "${staged[@]}"; do
+  for dirty in "${unstaged[@]}"; do
+    if [ "$file" = "$dirty" ]; then
+      printf 'lint-staged: %s has unstaged changes; stage or stash them first.\n' "$file" >&2
+      exit 1
+    fi
+  done
+done
+
+.venv/bin/ruff format -- "${staged[@]}"
+.venv/bin/ruff check --fix -- "${staged[@]}"
+git add -- "${staged[@]}"
+
+.venv/bin/mypy drift tests

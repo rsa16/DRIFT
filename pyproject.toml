@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "drift"
+authors = [
+    { name = "Rehan Ali", email = "rsa165.ali@gmail.com" },
+]
+version = "0.1.0"
+description = "DRIFT (Diffrential Infrared Frame Tracker) — SPHEREx epoch comparison service"
+requires-python = ">=3.12"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+dependencies = [
+    "fastapi==0.163.0",
+    "numpy==2.5.4",
+    "pydantic==2.14.3",
+    "uvicorn[standard]==0.54.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "httpx==0.28.1",
+    "pytest==9.2.0",
+]
+dev = [
+    "mypy==1.19.0",
+    "pip-audit==2.10.1",
+    "ruff==0.14.5",
+]
+
+[tool.setuptools.packages.find]
+include = ["drift*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py312"
+extend-exclude = [".scratch", ".venv", "web"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["drift", "tests"]
+check_untyped_defs = true
+no_implicit_optional = true
+warn_unused_ignores = true

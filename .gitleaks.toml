@@ -1,0 +1,12 @@
+title = "DRIFT"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated and vendor directories are not source."
+paths = [
+  '''(^|/)\.venv/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)web/build/''',
+]

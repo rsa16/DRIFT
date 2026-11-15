@@ -1,0 +1,44 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: drift-api:0.10
+    environment:
+      DRIFT_SNAPSHOT_DIR: /data/snapshots
+      DRIFT_CACHE_DIR: /data/cache
+      DRIFT_LIVE_ENABLED: "false"
+      DRIFT_IRSA_BASE: https://irsa.ipac.caltech.edu
+      DRIFT_DOMAIN: ${DRIFT_DOMAIN:-localhost}
+    volumes:
+      - drift-data:/data
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  web:
+    image: caddy:2-alpine
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./web:/srv:ro
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - drift-data:/snapshots:ro
+      - caddy-data:/data
+    restart: unless-stopped
+
+volumes:
+  drift-data:
+  caddy-data:
