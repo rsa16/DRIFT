@@ -1,4 +1,8 @@
 #!/bin/sh
 set -eu
-root=$(git rev-parse --show-toplevel)
-exec "$root/scripts/lint-staged"
+cd "$(git rev-parse --show-toplevel)"
+if ! command -v uv >/dev/null 2>&1; then
+  printf 'pre-commit: uv not found on PATH; run make setup.\n' >&2
+  exit 1
+fi
+exec uv run --frozen prek run --stage pre-commit

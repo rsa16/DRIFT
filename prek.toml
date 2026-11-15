@@ -1,0 +1,33 @@
+# Git hook configuration for prek.
+minimum_prek_version = "0.5.10"
+
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "ruff-format"
+name = "ruff format"
+entry = "uv run --frozen ruff format --force-exclude"
+language = "system"
+types = ["python"]
+exclude = '^\.scratch/'
+require_serial = true
+
+[[repos.hooks]]
+id = "ruff"
+name = "ruff check --fix"
+entry = "uv run --frozen ruff check --fix --force-exclude"
+language = "system"
+types = ["python"]
+exclude = '^\.scratch/'
+require_serial = true
+
+[[repos.hooks]]
+id = "mypy"
+name = "mypy"
+entry = "uv run --frozen mypy drift tests"
+language = "system"
+types = ["python"]
+exclude = '^\.scratch/'
+pass_filenames = false
+require_serial = true
