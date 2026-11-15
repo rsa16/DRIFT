@@ -1,0 +1,222 @@
+{
+  "collections": "collections.csv",
+  "cube_slice": {
+    "aperture": 3,
+    "bytes": 54720,
+    "dec": 64.66284,
+    "path": "cube/lpv_cube_slice.fits",
+    "ra": 273.55016,
+    "sha256": "54f47221431a76518077c95de5821c73c31a4d192dcebe70fd2100b2edfeca2f",
+    "url": "https://nasa-irsa-spherex.s3.us-east-1.amazonaws.com/dr1/hips5_cube/hips_20261026/Norder5/Dir0/Npix3839_cube.fits"
+  },
+  "cutouts": [
+    {
+      "access_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/dr1/level2/2026W19_1A/l2b-v27-2026-245/3/level2_2026W19_1A_0046_1D3_spx_l2b-v27-2026-245.fits",
+      "band": "D3",
+      "bytes": 129600,
+      "center": [
+        269.44621208499944,
+        4.768994747107907
+      ],
+      "collection": "spherex_dr1",
+      "mjd": 61164.133134,
+      "obs_publisher_did": "ivo://irsa.ipac/spherex_dr1?2026W19_1A_0046_1/D3",
+      "path": "cutouts/barnard_dr1.fits",
+      "sha256": "bf2c77032c7fd681f60b239ec29a4ad377dcb22eaf241579a0a32ff96204faf4",
+      "size_deg": 0.1,
+      "strip_epsf": true,
+      "target": "barnard",
+      "url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/dr1/level2/2026W19_1A/l2b-v27-2026-245/3/level2_2026W19_1A_0046_1D3_spx_l2b-v27-2026-245.fits?center=269.44621208499944%2C4.768994747107907&size=0.1"
+    },
+    {
+      "access_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/qr3/level2/2026W34_1A/l2b-v27-2026-243/3/level2_2026W34_1A_0431_4D3_spx_l2b-v27-2026-243.fits",
+      "band": "D3",
+      "bytes": 129600,
+      "center": [
+        269.4461468240936,
+        4.769836592129789
+      ],
+      "collection": "spherex_qr3",
+      "mjd": 61271.210547,
+      "obs_publisher_did": "ivo://irsa.ipac/spherex_qr3?2026W34_1A_0431_4/D3",
+      "path": "cutouts/barnard_qr3.fits",
+      "sha256": "84eca38a5dcfcf8898bf91fb3e49e6828694e8a97294145d0e89b3ac9f14bfbc",
+      "size_deg": 0.1,
+      "strip_epsf": true,
+      "target": "barnard",
+      "url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/qr3/level2/2026W34_1A/l2b-v27-2026-243/3/level2_2026W34_1A_0431_4D3_spx_l2b-v27-2026-243.fits?center=269.4461468240936%2C4.769836592129789&size=0.1"
+    },
+    {
+      "access_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/dr1/level2/2026W17_1B/l2b-v27-2026-242/1/level2_2026W17_1B_0291_2D1_spx_l2b-v27-2026-242.fits",
+      "band": "D1",
+      "bytes": 132480,
+      "center": [
+        305.2657,
+        -29.3597
+      ],
+      "collection": "spherex_dr1",
+      "mjd": 61151.568527,
+      "obs_publisher_did": "ivo://irsa.ipac/spherex_dr1?2026W17_1B_0291_2/D1",
+      "path": "cutouts/bamberga_dr1.fits",
+      "sha256": "41d3c48921c34e1263873dff90a11ae4f0348c46f2857a4e02ecd8c1ac54788c",
+      "size_deg": 0.1,
+      "strip_epsf": true,
+      "target": "bamberga",
+      "url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/dr1/level2/2026W17_1B/l2b-v27-2026-242/1/level2_2026W17_1B_0291_2D1_spx_l2b-v27-2026-242.fits?center=305.2657%2C-29.3597&size=0.1"
+    }
+  ],
+  "generated_at": "2026-11-15T17:18:11.605091Z",
+  "schema_version": 1,
+  "searches": [
+    {
+      "archive_row_count": null,
+      "collection": "spherex_dr1",
+      "path": "sia/barnard__spherex_dr1.csv",
+      "pos": [
+        269.452075,
+        4.693365
+      ],
+      "row_count": 240,
+      "sampled": false,
+      "sha256": "a2f426f21b1acadf0b2f51f5f3452bdc8731b96680a8211f5bc3c1f60629be4f",
+      "size_deg": 0.01,
+      "target": "barnard",
+      "url": "https://irsa.ipac.caltech.edu/SIA?COLLECTION=spherex_dr1&POS=circle+269.452075+4.693365+0.01&RESPONSEFORMAT=csv"
+    },
+    {
+      "archive_row_count": null,
+      "collection": "spherex_qr3",
+      "path": "sia/barnard__spherex_qr3.csv",
+      "pos": [
+        269.452075,
+        4.693365
+      ],
+      "row_count": 123,
+      "sampled": false,
+      "sha256": "148cd5b21c945d9b2b417d08744dd1e70daffe1095d6d241a4a6573789a176ba",
+      "size_deg": 0.01,
+      "target": "barnard",
+      "url": "https://irsa.ipac.caltech.edu/SIA?COLLECTION=spherex_qr3&POS=circle+269.452075+4.693365+0.01&RESPONSEFORMAT=csv"
+    },
+    {
+      "archive_row_count": null,
+      "collection": "spherex_dr1",
+      "path": "sia/wise0855__spherex_dr1.csv",
+      "pos": [
+        133.7375,
+        -7.2402
+      ],
+      "row_count": 258,
+      "sampled": false,
+      "sha256": "ecf4a0c47ca71a09c69abd98928ec323afc859ae0fd1e3a68e73f4cb03348ad2",
+      "size_deg": 0.01,
+      "target": "wise0855",
+      "url": "https://irsa.ipac.caltech.edu/SIA?COLLECTION=spherex_dr1&POS=circle+133.7375+-7.2402+0.01&RESPONSEFORMAT=csv"
+    },
+    {
+      "archive_row_count": null,
+      "collection": "spherex_dr1",
+      "path": "sia/bamberga__spherex_dr1.csv",
+      "pos": [
+        305.2657,
+        -29.3597
+      ],
+      "row_count": 230,
+      "sampled": false,
+      "sha256": "c9c88bbe6cbe117b74d48de2c4bed888263a915348b3287538ff0844ec6bb066",
+      "size_deg": 0.01,
+      "target": "bamberga",
+      "url": "https://irsa.ipac.caltech.edu/SIA?COLLECTION=spherex_dr1&POS=circle+305.2657+-29.3597+0.01&RESPONSEFORMAT=csv"
+    },
+    {
+      "archive_row_count": 15699,
+      "collection": "spherex_dr1_deep",
+      "path": "sia/lpv__spherex_dr1_deep.csv",
+      "pos": [
+        273.55016,
+        64.66284
+      ],
+      "row_count": 400,
+      "sampled": true,
+      "sha256": "96008991b5224082181f128d2210b3a48879abc34f861478978c3d63b0a9d06a",
+      "size_deg": 0.01,
+      "target": "lpv",
+      "url": "https://irsa.ipac.caltech.edu/SIA?COLLECTION=spherex_dr1_deep&POS=circle+273.55016+64.66284+0.01&RESPONSEFORMAT=csv"
+    },
+    {
+      "archive_row_count": null,
+      "collection": "spherex_dr1",
+      "path": "sia/rdra__spherex_dr1.csv",
+      "pos": [
+        248.0642,
+        66.7525
+      ],
+      "row_count": 418,
+      "sampled": false,
+      "sha256": "8cb021c578edfc84ffadd0ee4a8d2caf1a3ea101ae906138b275a9eb878f8baf",
+      "size_deg": 0.01,
+      "target": "rdra",
+      "url": "https://irsa.ipac.caltech.edu/SIA?COLLECTION=spherex_dr1&POS=circle+248.0642+66.7525+0.01&RESPONSEFORMAT=csv"
+    },
+    {
+      "archive_row_count": null,
+      "collection": "spherex_dr1_deep",
+      "path": "sia/rdra__spherex_dr1_deep.csv",
+      "pos": [
+        248.0642,
+        66.7525
+      ],
+      "row_count": 1227,
+      "sampled": false,
+      "sha256": "190905984220397f1af7b38a6aa868c3eaa477d3bac630d02fe10665d9696cc6",
+      "size_deg": 0.01,
+      "target": "rdra",
+      "url": "https://irsa.ipac.caltech.edu/SIA?COLLECTION=spherex_dr1_deep&POS=circle+248.0642+66.7525+0.01&RESPONSEFORMAT=csv"
+    },
+    {
+      "archive_row_count": null,
+      "collection": "spherex_qr3",
+      "path": "sia/rdra__spherex_qr3.csv",
+      "pos": [
+        248.0642,
+        66.7525
+      ],
+      "row_count": 127,
+      "sampled": false,
+      "sha256": "10dfb71f6fd5428b3b8f433a8e59a30a926faed1be49ad6c4ab07a6b379a71f2",
+      "size_deg": 0.01,
+      "target": "rdra",
+      "url": "https://irsa.ipac.caltech.edu/SIA?COLLECTION=spherex_qr3&POS=circle+248.0642+66.7525+0.01&RESPONSEFORMAT=csv"
+    },
+    {
+      "archive_row_count": null,
+      "collection": "spherex_qr3_deep",
+      "path": "sia/rdra__spherex_qr3_deep.csv",
+      "pos": [
+        248.0642,
+        66.7525
+      ],
+      "row_count": 729,
+      "sampled": false,
+      "sha256": "bbcacc80eee88eb00dd6d53aaf317f1def6e0bab7760d6bea03f84730cc5f4b1",
+      "size_deg": 0.01,
+      "target": "rdra",
+      "url": "https://irsa.ipac.caltech.edu/SIA?COLLECTION=spherex_qr3_deep&POS=circle+248.0642+66.7525+0.01&RESPONSEFORMAT=csv"
+    },
+    {
+      "archive_row_count": 15349,
+      "collection": "spherex_dr1_deep",
+      "path": "sia/nonvar__spherex_dr1_deep.csv",
+      "pos": [
+        275.25249,
+        65.39471
+      ],
+      "row_count": 400,
+      "sampled": true,
+      "sha256": "bfd4a964715c13f1927d6afc501eabf64e4636c36cb8a78090535597bc0946e7",
+      "size_deg": 0.01,
+      "target": "nonvar",
+      "url": "https://irsa.ipac.caltech.edu/SIA?COLLECTION=spherex_dr1_deep&POS=circle+275.25249+65.39471+0.01&RESPONSEFORMAT=csv"
+    }
+  ]
+}
