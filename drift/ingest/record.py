@@ -38,7 +38,6 @@ from drift.ingest.targets import (
     CUBE_APERTURE,
     CUBE_CENTER,
     CUBE_URL,
-    CUTOUT_SIZE_DEG,
     FIXTURE_CUTOUTS,
     FIXTURE_SEARCHES,
     SEED_COLLECTIONS,
@@ -269,13 +268,13 @@ def fixture_complete(root: Path) -> bool:
             expected_cutout_url = fetcher.cutout_url(
                 str(entry["access_url"]),
                 center=(float(center[0]), float(center[1])),
-                size_deg=CUTOUT_SIZE_DEG,
+                size_deg=cutout_spec.size_deg,
             )
             if entry.get("url") != expected_cutout_url:
                 return False
             if not isclose(
                 float(entry.get("size_deg", -1)),
-                CUTOUT_SIZE_DEG,
+                cutout_spec.size_deg,
                 rel_tol=0,
                 abs_tol=1e-12,
             ):
@@ -492,7 +491,7 @@ def record(
             body = fetcher.fetch(
                 row["access_url"],
                 center=center,
-                size_deg=CUTOUT_SIZE_DEG,
+                size_deg=cutout_spec.size_deg,
                 strip_epsf=True,
             )
             _atomic_write(path, body)
@@ -505,9 +504,9 @@ def record(
                 "obs_publisher_did": row["obs_publisher_did"],
                 "access_url": row["access_url"],
                 "center": [center[0], center[1]],
-                "size_deg": CUTOUT_SIZE_DEG,
+                "size_deg": cutout_spec.size_deg,
                 "url": fetcher.cutout_url(
-                    row["access_url"], center=center, size_deg=CUTOUT_SIZE_DEG
+                    row["access_url"], center=center, size_deg=cutout_spec.size_deg
                 ),
                 "path": f"cutouts/{cutout_spec.filename}",
                 "bytes": len(body),

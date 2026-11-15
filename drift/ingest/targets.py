@@ -10,7 +10,7 @@ CUBE_URL = (
 )
 CUBE_CENTER = (273.55016, 64.66284)
 CUBE_APERTURE = 3
-CUTOUT_SIZE_DEG = 0.1
+CUTOUT_SIZE_DEG = 0.4
 
 # demo target fixtures
 # tuple is J2000 RA, Dec, proper motion RA, proper motion Dec (mas/yr).
@@ -40,6 +40,7 @@ class CutoutSpec:
     target_mjd: float
     filename: str
     center: tuple[float, float] | None = None
+    size_deg: float = CUTOUT_SIZE_DEG
 
 
 FIXTURE_SEARCHES: tuple[SearchSpec, ...] = (
@@ -58,8 +59,12 @@ FIXTURE_SEARCHES: tuple[SearchSpec, ...] = (
 )
 
 FIXTURE_CUTOUTS: tuple[CutoutSpec, ...] = (
-    CutoutSpec("barnard", "spherex_dr1", "D3", 61164.1331, "barnard_dr1.fits"),
-    CutoutSpec("barnard", "spherex_qr3", "D3", 61271.210547, "barnard_qr3.fits"),
+    CutoutSpec("barnard", "spherex_dr1", "D5", 61120.550580, "barnard_dr1_0371_2.fits"),
+    CutoutSpec("barnard", "spherex_dr1", "D5", 61120.553564, "barnard_dr1_0371_4.fits"),
+    CutoutSpec("barnard", "spherex_qr3", "D5", 61273.383164, "barnard_qr3_0178_4.fits"),
+    CutoutSpec("barnard", "spherex_qr3", "D5", 61273.514855, "barnard_qr3_0206_2.fits"),
+    CutoutSpec("barnard", "spherex_qr3", "D5", 61270.867116, "barnard_qr3_0363_1.fits"),
+    CutoutSpec("barnard", "spherex_qr3", "D5", 61271.343553, "barnard_qr3_0456_2.fits"),
     CutoutSpec(
         "bamberga",
         "spherex_dr1",
@@ -67,6 +72,7 @@ FIXTURE_CUTOUTS: tuple[CutoutSpec, ...] = (
         61151.56853,
         "bamberga_dr1.fits",
         center=(305.2657, -29.3597),
+        size_deg=0.1,
     ),
 )
 

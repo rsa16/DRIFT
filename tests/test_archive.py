@@ -231,7 +231,7 @@ def test_recorded_cutouts_have_no_epsf_and_replay_byte_identically() -> None:
         recorded = store.cutout(entry["url"])
         names = fits_hdu_names(recorded)
         assert "EPSF" not in names
-        assert "IMAGE" in names
+        assert {"IMAGE", "FLAGS", "VARIANCE", "WCS-WAVE"} <= set(names)
         replay = fetcher.fetch(
             entry["access_url"],
             center=tuple(entry["center"]),
@@ -256,7 +256,7 @@ def test_fixture_holds_a_cube_slice() -> None:
 
 def test_fixture_is_within_budget() -> None:
     total = sum(path.stat().st_size for path in FIXTURE.rglob("*") if path.is_file())
-    assert total <= 5 * 1024 * 1024
+    assert total <= 16 * 1024 * 1024
 
 
 def _fits_card(key: str, value: str = "") -> bytes:
@@ -437,21 +437,25 @@ def test_record_builds_a_fixture_from_a_fake_archive(
 
     searches: list[bytes] = []
     for spec in targets.FIXTURE_SEARCHES:
-        band = "D1" if spec.target == "bamberga" else "D3"
-        mjd = {
-            ("barnard", "spherex_dr1"): 61164.1331,
-            ("barnard", "spherex_qr3"): 61271.210547,
-            ("bamberga", "spherex_dr1"): 61151.56853,
-        }.get((spec.target, spec.collection), 61000.0)
-        searches.append(
-            (
-                "obs_publisher_did,access_url,t_min,obs_release_date,"
-                "obs_collection,energy_bandpassname\n"
-                f"ivo://example/{spec.target}/{spec.collection},"
-                f"https://example.test/{spec.target}_{spec.collection}.fits,"
+        rows = [
+            (cutout.filename, cutout.target_mjd, cutout.band)
+            for cutout in targets.FIXTURE_CUTOUTS
+            if cutout.target == spec.target and cutout.collection == spec.collection
+        ]
+        if not rows:
+            band = "D1" if spec.target == "bamberga" else "D3"
+            rows = [(f"{spec.target}_{spec.collection}", 61000.0, band)]
+        body = (
+            "obs_publisher_did,access_url,t_min,obs_release_date,"
+            "obs_collection,energy_bandpassname\n"
+            + "".join(
+                f"ivo://example/{spec.target}/{filename},"
+                f"https://example.test/{filename}.fits,"
                 f"{mjd},2026-01-01,{spec.collection},SPHEREx-{band}\n"
-            ).encode()
+                for filename, mjd, band in rows
+            )
         )
+        searches.append(body.encode())
     discovery_body = (
         "collection,release_date\n"
         + "".join(
