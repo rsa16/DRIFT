@@ -1,20 +1,17 @@
-PYTHON ?= python3
-VENV := .venv
-BIN := $(VENV)/bin
-PY := $(BIN)/python
+UV ?= uv
+PY := $(UV) run --frozen
 
 .PHONY: setup check fix audit secret-scan
 
 setup:
-	$(PYTHON) -m venv $(VENV)
-	$(BIN)/pip install -e '.[test,dev]'
+	$(UV) sync --frozen --all-extras
 	git config core.hooksPath .githooks
 
 check:
-	$(BIN)/ruff format --check drift tests
-	$(BIN)/ruff check drift tests
-	$(BIN)/mypy drift tests
-	$(BIN)/pytest -q
+	$(PY) ruff format --check drift tests
+	$(PY) ruff check drift tests
+	$(PY) mypy drift tests
+	$(PY) pytest -q
 	@if [ -f web/package.json ]; then \
 		pnpm -C web install --frozen-lockfile && \
 		pnpm -C web check && \
@@ -24,12 +21,12 @@ check:
 	fi
 
 fix:
-	$(BIN)/ruff format drift tests
-	$(BIN)/ruff check --fix drift tests
+	$(PY) ruff format drift tests
+	$(PY) ruff check --fix drift tests
 
 audit:
-	@$(BIN)/pip freeze --exclude-editable | grep -v '^pip==' > $(VENV)/audit-requirements.txt
-	$(BIN)/pip-audit -r $(VENV)/audit-requirements.txt
+	@$(UV) export --frozen --no-emit-project --all-extras --format requirements-txt > .venv/audit-requirements.txt
+	$(PY) pip-audit -r .venv/audit-requirements.txt
 
 secret-scan:
 	docker run --rm -v "$(CURDIR):/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 \
