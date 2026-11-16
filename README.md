@@ -1,2 +1,2 @@
 # DRIFT
-Diffrential Infrared Frame Tracker
+Differential Infrared Frame Tracker
