@@ -9,6 +9,7 @@ import re
 import shutil
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,31 @@ class FixtureSnapshotError(ManifestError):
 
 class _Model(BaseModel):
     model_config = ConfigDict(extra="allow")
+
+
+class Label(StrEnum):
+    """The fixed label taxonomy, in precedence order."""
+
+    CATALOGUED = "catalogued"
+    CATALOGUED_AND_MOVED = "catalogued-and-moved"
+    POSITION_STABLE = "position stable within measurement"
+    NO_CATALOGUE_MATCH = 'no catalogue match candidate "not confirmed"'
+    NO_MATCH_CROWDED = "no match but crowded (weak evidence)"
+    AMBIGUOUS = "ambiguous N entries"
+    NEIGHBOUR_RESIDUAL = "residual of a neighbour"
+    ASTEROID_PREDICTED = "known asteroid predicted (SkyBoT)"
+    ASTEROID_BELOW_DEPTH = "asteroid predicted but below depth"
+    SATURATED = "saturated"
+    TOO_FEW_PIXELS = "too few usable pixels"
+    CANNOT_ASSESS = "cannot assess"
+
+
+class ModeEligibility(_Model):
+    """A mode that the data either supports or refuses with a printed reason."""
+
+    enabled: bool
+    available: bool | None = None
+    reason: str = ""
 
 
 class Window(_Model):

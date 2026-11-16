@@ -20,6 +20,7 @@ from drift.config import Settings
 from drift.manifest import (
     Manifest,
     ManifestError,
+    ModeEligibility,
     SnapshotPointer,
     Target,
     is_fixture_manifest,
@@ -169,7 +170,9 @@ def _shared_bands(epochs: list[Any]) -> list[int]:
 
 
 def _mode(enabled: bool, reason: str) -> dict[str, Any]:
-    return {"enabled": enabled, "reason": reason}
+    return ModeEligibility(
+        enabled=enabled, available=enabled, reason=reason
+    ).model_dump(mode="json")
 
 
 def _band_counts(target: Target) -> dict[int, list[Any]]:
@@ -184,25 +187,42 @@ def _band_counts(target: Target) -> dict[int, list[Any]]:
 
 def _band_sigma(target: Target, band: int) -> float:
     values = [
-        frame.sigma
-        for visit in target.visits
-        for frame in visit.frames
-        if frame.band == band and frame.sigma is not None
+        frame.sigma for _, frame in _stack(target, band)[0] if frame.sigma is not None
     ]
     return sum(values) / len(values) if values else float("inf")
+
+
+def _default_band(target: Target) -> int | None:
+    """Most stackable λ-matched visits, then lowest σ, then band index."""
+    bands = _band_counts(target)
+    if not bands:
+        return target.timeline.default_band if target.timeline else None
+    counts = {band: len(_stack(target, band)[0]) for band in bands}
+    return max(
+        counts,
+        key=lambda item: (counts[item], -_band_sigma(target, item), -item),
+    )
 
 
 def _resolve_band(target: Target, band: int | None) -> int | None:
     if band is not None:
         return band
-    if target.timeline and target.timeline.default_band is not None:
-        return target.timeline.default_band
-    counts = _band_counts(target)
-    if not counts:
-        return None
-    return max(
-        counts,
-        key=lambda item: (len(counts[item]), -_band_sigma(target, item), -item),
+    return _default_band(target)
+
+
+def _band_reason(target: Target, band: int | None) -> str:
+    if band is None:
+        return "No band is available for a visit timeline."
+    if (
+        target.timeline
+        and target.timeline.default_band == band
+        and target.timeline.band_reason
+    ):
+        return target.timeline.band_reason
+    matched = len(_stack(target, band)[0])
+    return (
+        f"Band {band} holds the most matched visits ({matched}); "
+        "ties break on lower noise, then band index."
     )
 
 
@@ -310,7 +330,7 @@ def _target_payload(
     frames = sum(len(visit.frames) for visit in target.visits)
     if frames == 0:
         frames = sum(len(epoch.frames) for epoch in target.epochs)
-    band = target.timeline.default_band if target.timeline else None
+    band = _default_band(target)
     payload.update(
         {
             "snapshot_id": manifest.snapshot_id,
@@ -323,6 +343,8 @@ def _target_payload(
         }
     )
     timeline = dict(payload.get("timeline") or {})
+    timeline["default_band"] = band
+    timeline["band_reason"] = _band_reason(target, band)
     timeline["bands"] = _timeline_bands(target)
     payload["timeline"] = timeline
     if detail:
@@ -447,7 +469,7 @@ def _timeline_frames(
         "mode": "timeline",
         "band": resolved,
         "detector": detector,
-        "default_band": target.timeline.default_band if target.timeline else None,
+        "default_band": _default_band(target),
         "visits_requested": requested,
         "visits": len(selected),
         "available_visits": len(rows),

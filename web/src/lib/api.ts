@@ -7,6 +7,7 @@ export interface WindowInfo {
 
 export interface TargetMode {
   enabled: boolean;
+  available?: boolean;
   reason: string;
 }
 
@@ -39,6 +40,7 @@ export interface TimelineInfo {
   default_detector?: string | null;
   visits: number;
   span_days: number | null;
+  band_reason?: string | null;
   bands?: number[];
 }
 

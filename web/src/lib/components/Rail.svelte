@@ -1,7 +1,7 @@
 <script lang="ts">
   import Histogram from "$lib/components/Histogram.svelte";
   import Info from "$lib/components/Info.svelte";
-  import Segmented from "$lib/components/Segmented.svelte";
+  import ModeTabs from "$lib/components/ModeTabs.svelte";
   import type { FramesResponse, TargetDetail, WindowInfo } from "$lib/api";
   import { readoutRows, type StackFacts } from "$lib/format";
   import type { RenderPreset } from "$lib/PlaneRenderer";
@@ -51,46 +51,10 @@
 
   const RAIL_WIDTH = 344;
 
-  const modeByName = $derived(
-    Object.fromEntries(modes.map((mode) => [mode.key, mode])),
-  );
-  const modeOptions = $derived([
-    {
-      value: "timeline",
-      label: "Timeline",
-      disabled: !modeByName.timeline?.enabled,
-      title: modeByName.timeline?.enabled
-        ? "Blink between matched-band visits."
-        : (modeByName.timeline?.reason ?? "Visit timeline is unavailable."),
-    },
-    {
-      value: "compare",
-      label: "Compare",
-      disabled: !modeByName.survey_compare?.enabled,
-      title: modeByName.survey_compare?.enabled
-        ? "Compare matched bands across epochs."
-        : (modeByName.survey_compare?.reason ??
-          "Survey compare is unavailable."),
-    },
-    {
-      value: "spectrum",
-      label: "Spectrum",
-      disabled: true,
-      title:
-        modeByName.spectrum?.reason ??
-        "Spectrum mode is unavailable for this target.",
-    },
-  ]);
-  const modeValue = $derived(stage === "compare" ? "compare" : "timeline");
-
   const rows = $derived(stack ? readoutRows(stack) : []);
   const windowTitle = $derived(
     frames ? `Window lo ${frames.window.lo}, hi ${frames.window.hi}, s ${frames.window.s}` : "",
   );
-
-  function selectMode(value: string): void {
-    if (value === "timeline" || value === "compare") onStage(value);
-  }
 </script>
 
 <aside
@@ -112,13 +76,7 @@
           {stage === "compare" ? "Epoch compare" : "Visit timeline"}
         </span>
       </div>
-      <Segmented
-        options={modeOptions}
-        value={modeValue}
-        label="Observation mode"
-        onSelect={selectMode}
-        testId="mode-switcher"
-      />
+      <ModeTabs {modes} {stage} {onStage} />
     </div>
 
     <div class="min-h-0 flex-1 overflow-y-auto">
@@ -183,6 +141,14 @@
             data-testid="readout-band">B{band ?? "—"}</span
           >
         </div>
+        {#if detail?.timeline?.band_reason}
+          <p
+            class="m-0 mb-2 text-fine leading-snug text-faint"
+            data-testid="band-reason"
+          >
+            {detail.timeline.band_reason}
+          </p>
+        {/if}
         <dl class="flex flex-col gap-1 text-label">
           {#each rows as item (item.label)}
             <div
