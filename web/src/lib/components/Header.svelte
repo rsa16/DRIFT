@@ -48,7 +48,7 @@
   const selectValue = $derived(liveActive ? "" : selectedId);
 
   function formatAge(seconds: number | null): string {
-    if (seconds === null || seconds === undefined) return "unknown age";
+    if (seconds === null || seconds === undefined) return "Age unavailable";
     if (seconds < 120) return `${Math.round(seconds)} s old`;
     if (seconds < 7200) return `${Math.round(seconds / 60)} min old`;
     if (seconds < 172800) return `${Math.round(seconds / 3600)} h old`;
@@ -145,11 +145,11 @@
         id="target-select"
         class="h-7 w-[13rem] appearance-none rounded-control border border-line bg-raised px-2 pr-6 text-fine text-text"
         value={selectValue}
-        title={selected ? `Demo target: ${targetLabel(selected)} — ${selectedId}` : "Open a demo target"}
+        title={selected ? `Demo target: ${targetLabel(selected)} — ${selectedId}` : "Choose a demo target"}
         onchange={(event) => onTarget(event.currentTarget.value)}
       >
         {#if !selectedId || liveActive}
-          <option value="" disabled>Demo target…</option>
+          <option value="" disabled>Select a demo target…</option>
         {/if}
         {#each targets as target (target.id)}
           <option value={target.id} title={targetLabel(target)}>

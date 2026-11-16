@@ -52,7 +52,7 @@
     if (!data || !stretchWindow) {
       ctx.fillStyle = "rgba(163,168,177,0.55)";
       ctx.font = "11px 'IBM Plex Sans', system-ui, sans-serif";
-      ctx.fillText("No plane loaded", padX + 4, baseY - 8);
+      ctx.fillText("No image loaded", padX + 4, baseY - 8);
       return;
     }
 

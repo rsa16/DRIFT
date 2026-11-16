@@ -22,11 +22,11 @@
   const reason = $derived(
     omitted.length
       ? unit === "band" || unit === "epoch"
-        ? `Omitted ${omitted.join(", ")}; showing ${shown} planes within the budget.`
+        ? `Some images were omitted. Showing ${shown}.`
         : `${shown} of ${available} visits; omitted ${omitted.join(", ")}.`
       : resolutionReduced
-        ? "The stack exceeded the payload budget, so resolution was reduced after uniform MJD thinning."
-        : "The stack exceeded the payload budget.",
+        ? "The response was too large, so fewer images are shown at lower resolution."
+        : "The response was too large, so fewer images are shown.",
   );
 </script>
 

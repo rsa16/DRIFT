@@ -219,7 +219,7 @@
     ...(frames?.refused_frames ?? []).map((id) => `Refused frame ${id}.`),
   ]);
   const altText = $derived.by(() => {
-    if (!currentFacts || !stackFacts) return "No frame loaded.";
+    if (!currentFacts || !stackFacts) return "No image loaded.";
     if (rgb && frames?.mode === "rgb") {
       return (
         `Temporal RGB composite of ${frames.planes.length} visits. ` +
@@ -269,15 +269,15 @@
     if (error instanceof Spx1Error) {
       return {
         kind: "error",
-        title: "Plane rejected",
-        message: `${error.message}. Nothing was drawn.`,
+        title: "Image could not be loaded",
+        message: `${error.message}. No image was displayed.`,
         retryable: true,
       };
     }
     if (error instanceof RendererError) {
       return {
         kind: "error",
-        title: "Renderer unavailable",
+        title: "Image viewer unavailable",
         message: error.message,
         retryable: true,
       };
@@ -292,7 +292,7 @@
     }
     return {
       kind: "error",
-      title: "Unexpected error",
+      title: "Something went wrong",
       message: String(error),
       retryable: true,
     };
@@ -315,8 +315,8 @@
     if (!canvasA) {
       appState = {
         kind: "error",
-        title: "Renderer unavailable",
-        message: "The image canvas was not mounted.",
+        title: "Image viewer unavailable",
+        message: "The image viewer could not be initialized.",
       };
       return false;
     }

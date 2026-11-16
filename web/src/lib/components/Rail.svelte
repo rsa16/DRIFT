@@ -82,7 +82,7 @@
     ? 'border-l border-line'
     : ''}"
   style={`width:${open ? RAIL_WIDTH : 0}px; opacity:${open ? 1 : 0};`}
-  aria-label="Target and stack details"
+  aria-label="Target and image details"
   aria-hidden={!open}
   inert={!open}
   data-testid="rail"
@@ -152,7 +152,7 @@
             </button>
           {/if}
         {:else}
-          <p class="text-label text-faint">No target loaded for this view.</p>
+          <p class="text-label text-faint">No target is loaded.</p>
         {/if}
       </section>
 
@@ -204,7 +204,7 @@
           {/if}
           {#if reference}
             <div class="flex items-baseline justify-between gap-2 border-b border-line/60 pb-1">
-              <dt class="text-faint">Difference ref</dt>
+              <dt class="text-faint">Difference reference</dt>
               <dd
                 class="m-0 text-right text-text"
                 title={`${reference.visit_id} · ${formatDate(reference.date)} · ${formatMjd(reference.mjd)} · ${releaseLabel(reference.release)}`}

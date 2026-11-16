@@ -97,7 +97,7 @@
   class="flex min-h-0 min-w-0 flex-1 flex-col bg-void"
   aria-labelledby="stage-title"
 >
-  <h2 id="stage-title" class="sr-only">Matched-wavelength frame</h2>
+  <h2 id="stage-title" class="sr-only">Matched-wavelength image</h2>
 
   <figure class="m-0 flex min-h-0 flex-1 flex-col">
     <div
@@ -208,7 +208,7 @@
           <span class={index === caption.length - 1 ? "text-text" : ""}>{fact}</span>
         {/each}
       {:else}
-        <span class="text-faint">No frame loaded.</span>
+        <span class="text-faint">No image loaded.</span>
       {/if}
     </figcaption>
   </figure>

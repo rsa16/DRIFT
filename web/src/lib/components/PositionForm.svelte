@@ -54,11 +54,11 @@
     const decNumber = numberFrom(decValue);
     const fovNumber = numberFrom(fovValue);
     if (raNumber === null || raNumber < 0 || raNumber > 360) {
-      localError = "Right ascension must be between 0 and 360°.";
+      localError = "Right ascension must be between 0° and 360°.";
       return;
     }
     if (decNumber === null || decNumber < -90 || decNumber > 90) {
-      localError = "Declination must be between −90 and 90°.";
+      localError = "Declination must be between −90° and 90°.";
       return;
     }
     if (fovNumber === null || fovNumber <= 0 || fovNumber > maxFov) {
@@ -110,7 +110,7 @@
       />
     </label>
     <label class="flex flex-col gap-1">
-      <span class={label}>Frames</span>
+      <span class={label}>Visits</span>
       <select class={field} name="bins" bind:value={bins} disabled={busy}>
         <option value={2}>2</option>
         <option value={4}>4</option>
@@ -132,7 +132,7 @@
       class="rounded-control border border-signal/60 bg-signal/15 px-3 py-1 text-label text-signal transition-colors hover:bg-signal/25 disabled:cursor-not-allowed disabled:opacity-40"
       disabled={busy}
     >
-      {busy ? "Resolving…" : submitLabel}
+      {busy ? "Loading…" : submitLabel}
     </button>
   </div>
 </form>

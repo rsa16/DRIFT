@@ -335,8 +335,8 @@
         {#if degraded}
           <span
             class="ml-1 inline-flex h-7 items-center rounded-control border border-warn/50 bg-warn/10 px-1.5 text-fine text-warn"
-            title={`Omitted visit ids: ${omitted.join(", ")}`}
-            aria-label={`Degraded: ${omitted.length} ${
+            title={`Visits not shown: ${omitted.join(", ")}`}
+            aria-label={`Incomplete: ${omitted.length} ${
               omitted.length === 1 ? "visit" : "visits"
             } omitted: ${omitted.join(", ")}`}
             data-testid="degraded-chip"
@@ -354,7 +354,7 @@
           class="h-7 w-[5.5rem] rounded-control border border-warm/50 bg-raised px-1.5 text-fine text-warm disabled:cursor-not-allowed disabled:opacity-40"
           value={String(referenceIndex)}
           disabled={disabled || rgb || steps.length < 2}
-          title="Reference visit for Difference. Difference is unavailable while the current step is the reference."
+          title="Visit used as the difference reference. Choose another visit to compare."
           onchange={(event) => onReference(Number(event.currentTarget.value))}
         >
           {#each steps as step, position (step.meta.visit_id ??
@@ -395,7 +395,7 @@
           disabled={disabled || !canRgb}
           title={canRgb
             ? "Compose three visits from this band as a temporal RGB."
-            : "Temporal RGB needs three visits at one matched band."}
+            : "Temporal RGB requires three visits in the same band."}
           onclick={onRgb}
           data-testid="rgb-toggle"
         >
