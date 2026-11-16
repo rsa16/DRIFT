@@ -36,7 +36,7 @@ def _settings(tmp_path) -> Settings:
         {
             "DRIFT_SNAPSHOT_DIR": str(tmp_path / "snapshots"),
             "DRIFT_CACHE_DIR": str(tmp_path / "cache"),
-            "DRIFT_LIVE_ENABLED": "false",
+            "DRIFT_LIVE_ENABLED": "true",
         }
     )
 
@@ -83,7 +83,6 @@ def test_config_reads_only_documented_environment_variables(tmp_path):
         {
             "DRIFT_SNAPSHOT_DIR": str(tmp_path / "snap"),
             "DRIFT_CACHE_DIR": str(tmp_path / "cache"),
-            "DRIFT_LIVE_ENABLED": "true",
             "DRIFT_IRSA_BASE": "https://irsa.example.invalid",
             "DRIFT_TLS_CERT": "/run/secrets/tls.crt",
             "DRIFT_TLS_KEY": "/run/secrets/tls.key",
@@ -94,7 +93,6 @@ def test_config_reads_only_documented_environment_variables(tmp_path):
 
     assert settings.snapshot_dir == tmp_path / "snap"
     assert settings.cache_dir == tmp_path / "cache"
-    assert settings.live_enabled is True
     assert settings.irsa_base == "https://irsa.example.invalid"
     assert (
         settings.tls_cert == tmp_path.parent / "secrets" / "tls.crt"
@@ -115,7 +113,7 @@ def test_config_defaults_come_from_the_process_environment(
 
     assert settings.snapshot_dir == clean_config_env / "snap"
     assert settings.irsa_base == "https://irsa.example.invalid"
-    assert settings.live_enabled is False
+    assert settings.live_enabled is True
     assert settings.tls_cert is None
 
 

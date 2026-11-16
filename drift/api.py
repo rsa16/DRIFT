@@ -682,9 +682,17 @@ def _timeline_frames(
         )
         planes.append(plane)
         if snapshot_dir is not None:
-            bodies.append(
-                _source_plane_path(manifest, frame, snapshot_dir).read_bytes()
-            )
+            filename = Path(frame.href or "").name
+            if SAFE_FILENAME.fullmatch(filename):
+                source_path = (
+                    Path(snapshot_dir)
+                    / "v1"
+                    / manifest.snapshot_id
+                    / "planes"
+                    / filename
+                )
+                if source_path.is_file():
+                    bodies.append(source_path.read_bytes())
         visits.append(
             {
                 "visit_id": visit.visit_id,

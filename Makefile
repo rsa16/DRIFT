@@ -3,7 +3,7 @@ PY := $(UV) run --frozen
 DEMO_FIXTURE := build/demo-fixture
 DEMO_SNAPSHOTS := build/demo-snapshots
 
-.PHONY: setup check fix audit secret-scan demo-fixture demo-snapshot
+.PHONY: setup check fix docs-check audit secret-scan demo-fixture demo-snapshot
 
 setup:
 	$(UV) sync --frozen --all-extras
@@ -26,6 +26,9 @@ check:
 fix:
 	$(PY) ruff format drift tests
 	$(PY) ruff check --fix drift tests
+
+docs-check:
+	$(PY) pytest -q tests/test_docs_links.py
 
 demo-fixture:
 	$(PY) python -m drift.ingest record --fixture $(DEMO_FIXTURE) \

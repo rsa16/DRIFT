@@ -38,7 +38,7 @@ class Settings(BaseSettings):
 
     snapshot_dir: Path = DEFAULT_SNAPSHOT_DIR
     cache_dir: Path = DEFAULT_CACHE_DIR
-    live_enabled: bool = False
+    live_enabled: bool = True
     allow_fixture: bool = False
     irsa_base: str = DEFAULT_IRSA_BASE
     trusted_proxy_hops: int = 0
