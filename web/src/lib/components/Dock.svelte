@@ -19,7 +19,9 @@
     index: number;
     playing: boolean;
     difference: boolean;
+    rgb: boolean;
     canDifference: boolean;
+    canRgb: boolean;
     tone: RenderPreset;
     bands: number[];
     band: number;
@@ -39,6 +41,7 @@
     onStep: (delta: number) => void;
     onTogglePlay: () => void;
     onDifference: () => void;
+    onRgb: () => void;
     onReference: (index: number) => void;
     onTone: (tone: RenderPreset) => void;
     onBand: (band: number) => void;
@@ -51,7 +54,9 @@
     index,
     playing,
     difference,
+    rgb,
     canDifference,
+    canRgb,
     tone,
     bands,
     band,
@@ -71,6 +76,7 @@
     onStep,
     onTogglePlay,
     onDifference,
+    onRgb,
     onReference,
     onTone,
     onBand,
@@ -282,7 +288,7 @@
           type="button"
           class={button + " w-7"}
           aria-label="Previous visit"
-          disabled={disabled || index <= 0}
+          disabled={disabled || rgb || index <= 0}
           onclick={() => onStep(-1)}
         >
           <svg viewBox="0 0 12 12" class="h-3 w-3 fill-none stroke-current [stroke-width:1.4]" aria-hidden="true">
@@ -294,7 +300,7 @@
           class={button + " w-9"}
           aria-pressed={playing}
           aria-label={playing ? "Pause" : "Play"}
-          disabled={disabled || difference}
+          disabled={disabled || difference || rgb}
           onclick={onTogglePlay}
         >
           {#if playing}
@@ -312,7 +318,7 @@
           type="button"
           class={button + " w-7"}
           aria-label="Next visit"
-          disabled={disabled || index >= steps.length - 1}
+          disabled={disabled || rgb || index >= steps.length - 1}
           onclick={() => onStep(1)}
         >
           <svg viewBox="0 0 12 12" class="h-3 w-3 fill-none stroke-current [stroke-width:1.4]" aria-hidden="true">
@@ -347,7 +353,7 @@
           data-testid="reference-chip"
           class="h-7 w-[5.5rem] rounded-control border border-warm/50 bg-raised px-1.5 text-fine text-warm disabled:cursor-not-allowed disabled:opacity-40"
           value={String(referenceIndex)}
-          disabled={disabled || steps.length < 2}
+          disabled={disabled || rgb || steps.length < 2}
           title="Reference visit for Difference. Difference is unavailable while the current step is the reference."
           onchange={(event) => onReference(Number(event.currentTarget.value))}
         >
@@ -370,13 +376,30 @@
               ? " border-signal/60 bg-signal/15 text-signal hover:bg-signal/20 hover:text-signal"
               : "")}
           aria-pressed={difference}
-          disabled={disabled || !canDifference}
+          disabled={disabled || rgb || !canDifference}
           title={canDifference
             ? "Compare this step with the reference visit."
             : "This step is the reference visit; choose another step to compare."}
           onclick={onDifference}
         >
           Difference
+        </button>
+
+        <button
+          type="button"
+          class={button +
+            (rgb
+              ? " border-signal/60 bg-signal/15 text-signal hover:bg-signal/20 hover:text-signal"
+              : "")}
+          aria-pressed={rgb}
+          disabled={disabled || !canRgb}
+          title={canRgb
+            ? "Compose three visits from this band as a temporal RGB."
+            : "Temporal RGB needs three visits at one matched band."}
+          onclick={onRgb}
+          data-testid="rgb-toggle"
+        >
+          RGB
         </button>
       </div>
 
@@ -392,6 +415,7 @@
             value={tone}
             label="Tone mapping"
             compact
+            testId="stretch-preset"
             onSelect={(next) => onTone(next as RenderPreset)}
           />
         </div>
@@ -444,7 +468,7 @@
               step="1"
               value={fps}
               aria-valuetext={`${fps} frames per second`}
-              disabled={disabled || difference}
+              disabled={disabled || difference || rgb}
               oninput={(event) => onFps(Number(event.currentTarget.value))}
             />
           </div>

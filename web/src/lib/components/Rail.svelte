@@ -2,8 +2,19 @@
   import Histogram from "$lib/components/Histogram.svelte";
   import Info from "$lib/components/Info.svelte";
   import ModeTabs from "$lib/components/ModeTabs.svelte";
-  import type { FramesResponse, TargetDetail, WindowInfo } from "$lib/api";
-  import { readoutRows, type StackFacts } from "$lib/format";
+  import type {
+    FramesResponse,
+    ReferenceVisit,
+    TargetDetail,
+    WindowInfo,
+  } from "$lib/api";
+  import {
+    formatDate,
+    formatMjd,
+    readoutRows,
+    releaseLabel,
+    type StackFacts,
+  } from "$lib/format";
   import type { RenderPreset } from "$lib/PlaneRenderer";
   import type { HistogramData } from "$lib/histogram";
   import type { ViewState } from "$lib/ShareState";
@@ -19,6 +30,8 @@
     detail: TargetDetail | null;
     frames: FramesResponse | null;
     stack: StackFacts | null;
+    reference: ReferenceVisit | null;
+    bandpass: { deltaUm: number; fraction: number } | null;
     modes: ModeRow[];
     view: ViewState;
     citation: string;
@@ -36,6 +49,8 @@
     detail,
     frames,
     stack,
+    reference,
+    bandpass,
     modes,
     view,
     citation,
@@ -170,6 +185,36 @@
                   rel="noreferrer"
                   title={sourceUrl}>this visit's cutout</a
                 >
+              </dd>
+            </div>
+          {/if}
+          {#if reference}
+            <div class="flex items-baseline justify-between gap-2 border-b border-line/60 pb-1">
+              <dt class="text-faint">Difference ref</dt>
+              <dd
+                class="m-0 text-right text-text"
+                title={`${reference.visit_id} · ${formatDate(reference.date)} · ${formatMjd(reference.mjd)} · ${releaseLabel(reference.release)}`}
+              >
+                {formatDate(reference.date).slice(0, 10)}
+                <span class="text-faint">
+                  · {releaseLabel(reference.release)}
+                </span>
+              </dd>
+            </div>
+          {/if}
+          {#if bandpass}
+            <div class="flex items-baseline justify-between gap-2 border-b border-line/60 pb-1">
+              <dt class="text-faint">Bandpass Δ</dt>
+              <dd
+                class="m-0 text-right {bandpass.fraction > 0.25
+                  ? 'text-warn'
+                  : 'text-text'}"
+                title="Measured wavelength difference between this visit and its reference."
+              >
+                {bandpass.deltaUm.toFixed(3)} µm
+                <span class="text-faint">
+                  · {Math.round(bandpass.fraction * 100)}% of bin
+                </span>
               </dd>
             </div>
           {/if}

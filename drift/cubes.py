@@ -75,6 +75,63 @@ def propagate_position(
 
 
 @dataclass(frozen=True)
+class Difference:
+    """A difference image and its variance."""
+
+    image: np.ndarray
+    variance: np.ndarray | None
+    sigma_squared: float
+    sigma: float
+
+
+@dataclass(frozen=True)
+class DifferenceStack:
+    """Subtract matched planes and combine their variances."""
+
+    reference_sigma: float | None = None
+    current_sigma: float | None = None
+
+    def difference(
+        self,
+        reference: np.ndarray,
+        current: np.ndarray,
+        *,
+        reference_variance: np.ndarray | None = None,
+        current_variance: np.ndarray | None = None,
+    ) -> Difference:
+        first = np.asarray(reference, dtype=np.float32)
+        second = np.asarray(current, dtype=np.float32)
+        if first.shape != second.shape:
+            raise ValueError(
+                f"difference planes must match: {first.shape} != {second.shape}"
+            )
+        image = second - first
+        finite = np.isfinite(first) & np.isfinite(second)
+        image = np.where(finite, image, np.nan)
+
+        variance: np.ndarray | None = None
+        if reference_variance is not None and current_variance is not None:
+            variance = np.asarray(reference_variance, dtype=np.float32) + np.asarray(
+                current_variance, dtype=np.float32
+            )
+            variance = np.where(finite, variance, np.nan)
+
+        reference_sigma = self.reference_sigma
+        current_sigma = self.current_sigma
+        if reference_sigma is None:
+            reference_sigma = _robust_sigma(first)
+        if current_sigma is None:
+            current_sigma = _robust_sigma(second)
+        sigma_squared = float(reference_sigma) ** 2 + float(current_sigma) ** 2
+        return Difference(
+            image=image,
+            variance=variance,
+            sigma_squared=sigma_squared,
+            sigma=math.sqrt(max(0.0, sigma_squared)),
+        )
+
+
+@dataclass(frozen=True)
 class WaveAxis:
     """Per-pixel wavelength and bandwidth decoded from ``WCS-WAVE``."""
 

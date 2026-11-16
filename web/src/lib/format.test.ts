@@ -24,6 +24,7 @@ import {
 
 const frame: FrameFacts = {
   visitId: "qr3-61273.38316-D5",
+  epoch: null,
   date: "2026-08-21T09:11:00Z",
   mjd: 61273.383,
   release: "qr3",
@@ -61,6 +62,7 @@ test("maps plane metadata into frame facts from either visit or epoch rows", () 
     }),
     {
       visitId: "dr1-1-D5",
+      epoch: null,
       date: "2026-03-17T07:12:00Z",
       mjd: 61116.3,
       release: "dr1",
@@ -68,7 +70,13 @@ test("maps plane metadata into frame facts from either visit or epoch rows", () 
   );
   assert.deepEqual(
     frameFacts({ epoch_id: "fixture-dr1", mjd_min: 61116.3, release: "dr1" }),
-    { visitId: "fixture-dr1", date: null, mjd: 61116.3, release: "dr1" },
+    {
+      visitId: "fixture-dr1",
+      epoch: "fixture-dr1",
+      date: null,
+      mjd: 61116.3,
+      release: "dr1",
+    },
   );
   assert.equal(frameFacts(null), null);
   assert.equal(frameFacts(undefined), null);
@@ -116,10 +124,16 @@ test("a strip step names its date, MJD, release and visit id", () => {
   );
   assert.equal(
     stepAccessibleName(
-      { visitId: "fixture-dr1", date: null, mjd: 61116.3, release: "dr1" },
+      {
+        visitId: "fixture-dr1",
+        epoch: "fixture-dr1",
+        date: null,
+        mjd: 61116.3,
+        release: "dr1",
+      },
       1,
     ),
-    "Step 2: fixture-dr1, date unknown, MJD 61116.300, DR1",
+    "Step 2: fixture-dr1, date unknown, MJD 61116.300, DR1, epoch fixture-dr1",
   );
   assert.equal(stepAccessibleName(null, 2), "Step 3");
 });

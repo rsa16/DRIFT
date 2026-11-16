@@ -98,6 +98,7 @@ export interface PlaneMeta {
   dlambda_um: number;
   width: number;
   height: number;
+  pixel_scale_arcsec?: number;
   dtype: string;
   href: string;
   static_href: string;
@@ -105,7 +106,34 @@ export interface PlaneMeta {
   sha256: string;
   source_url?: string | null;
   saturated?: boolean | null;
+  sigma?: number | null;
+  sigma_squared?: number;
+  source_sigma?: number | null;
+  reference_sigma?: number | null;
+  channel?: "r" | "g" | "b";
+  role?: "difference" | "rgb";
+  difference?: boolean;
+  reference_visit_id?: string;
+  reference_saturated?: boolean;
+  cross_release?: boolean;
+  reference_lambda_um?: number | null;
+  bandpass_delta_um?: number;
+  bandpass_fraction?: number;
+  flag_bad_frac?: number | null;
+  resolution_reduced?: boolean;
   window_sha256: string;
+}
+
+export interface ReferenceVisit {
+  visit_id: string;
+  mjd: number | null;
+  date: string | null;
+  release: string;
+  detector?: string | null;
+  band?: number | null;
+  sigma?: number | null;
+  href?: string;
+  index?: number;
 }
 
 export interface FramesResponse {
@@ -121,14 +149,23 @@ export interface FramesResponse {
   visits?: number;
   visits_requested?: number;
   available_visits?: number;
+  plane_count?: number;
+  compressed_bytes?: number;
   degraded?: boolean;
+  degraded_header?: boolean;
+  resolution_reduced?: boolean;
   frames_omitted?: string[];
   refused_frames?: string[];
   span_days?: number;
   visits_meta?: VisitMeta[];
   epochs?: EpochDetail[];
+  reference?: ReferenceVisit;
+  channels?: string[];
+  cross_release?: boolean;
+  max_bandpass_fraction?: number;
   window: WindowInfo;
   pixel_scale_arcsec: number;
+  source_plane_px?: number;
   units: string;
   planes: PlaneMeta[];
 }
@@ -200,13 +237,16 @@ export function fetchTarget(id: string): Promise<TargetDetail> {
 }
 
 export interface FrameRequest {
-  mode?: "timeline" | "epoch" | "diff";
+  mode?: "timeline" | "epoch" | "diff" | "rgb";
   band?: number | null;
   visits?: number;
   bins?: number;
+  reference?: string | number;
+  visit?: string | number;
+  epochs?: string;
 }
 
-export function fetchFrames(
+export async function fetchFrames(
   id: string,
   request_: FrameRequest = {},
 ): Promise<FramesResponse> {
@@ -216,9 +256,25 @@ export function fetchFrames(
   }
   if (request_.visits !== undefined) params.set("visits", String(request_.visits));
   if (request_.bins !== undefined) params.set("bins", String(request_.bins));
-  return fetchJson<FramesResponse>(
+  if (request_.reference !== undefined) {
+    params.set("reference", String(request_.reference));
+  }
+  if (request_.visit !== undefined) params.set("visit", String(request_.visit));
+  if (request_.epochs !== undefined) params.set("epochs", request_.epochs);
+  const response = await request(
     `/api/v1/targets/${encodeURIComponent(id)}/frames?${params.toString()}`,
   );
+  let body: FramesResponse;
+  try {
+    body = (await response.json()) as FramesResponse;
+  } catch (error) {
+    throw new ApiError(
+      response.status,
+      `invalid JSON response: ${String(error)}`,
+    );
+  }
+  body.degraded_header = response.headers.get("x-spx-degraded") === "1";
+  return body;
 }
 
 export function fetchHealth(): Promise<Health> {

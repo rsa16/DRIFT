@@ -279,6 +279,34 @@ def _stretch_window(arrays: list[np.ndarray]) -> dict[str, Any]:
     return window
 
 
+SURVEY_GROUP_DAYS = 182.0
+
+
+def _survey_groups(
+    spec: SyntheticTargetSpec,
+) -> list[tuple[str, int, list[tuple[int, tuple[str, float]]]]]:
+    """Group each release's visits into roughly six-month intervals."""
+    groups: list[tuple[str, int, list[tuple[int, tuple[str, float]]]]] = []
+    for release in spec.releases:
+        members = [
+            (index, visit)
+            for index, visit in enumerate(spec.visits)
+            if visit[0] == release
+        ]
+        ordered = sorted(members, key=lambda item: item[1][1])
+        current: list[tuple[int, tuple[str, float]]] = []
+        start = ordered[0][1][1]
+        for item in ordered:
+            if current and item[1][1] - start > SURVEY_GROUP_DAYS:
+                groups.append((release, SURVEYS[release], current))
+                current = []
+                start = item[1][1]
+            current.append(item)
+        if current:
+            groups.append((release, SURVEYS[release], current))
+    return groups
+
+
 def _default_band(
     target_arrays: dict[tuple[int, int], np.ndarray], bands: list[int]
 ) -> int:
@@ -414,19 +442,45 @@ def build_synthetic_snapshot(
                 )
 
             epochs: list[dict[str, Any]] = []
-            for release in spec.releases:
-                members = [visit for visit in visits if visit["release"] == release]
+            groups = _survey_groups(spec)
+            groups_per_release: dict[str, int] = {}
+            for release, *_rest in groups:
+                groups_per_release[release] = groups_per_release.get(release, 0) + 1
+            seen_per_release: dict[str, int] = {}
+            for release, survey, members in groups:
+                seen_per_release[release] = seen_per_release.get(release, 0) + 1
+                group_visits = [visits[index] for index, _visit in members]
+                suffix = (
+                    ""
+                    if groups_per_release[release] == 1
+                    else f"-{seen_per_release[release]}"
+                )
+                representative = group_visits[-1]
+                epoch_frames = []
+                for frame in representative["frames"]:
+                    epoch_frame = dict(frame)
+                    epoch_frame.update(
+                        {
+                            "visit_id": representative["visit_id"],
+                            "mjd": representative["mjd"],
+                            "date": representative["date"],
+                            "detector": representative["detector"],
+                            "survey": representative["survey"],
+                            "collection": representative["collection"],
+                        }
+                    )
+                    epoch_frames.append(epoch_frame)
                 epochs.append(
                     {
-                        "epoch_id": f"fixture-{release}",
-                        "survey": SURVEYS[release],
+                        "epoch_id": f"fixture-{release}{suffix}",
+                        "survey": survey,
                         "release": release,
-                        "mjd_min": min(visit["mjd"] for visit in members),
-                        "mjd_max": max(visit["mjd"] for visit in members),
-                        "visit_ids": [visit["visit_id"] for visit in members],
+                        "mjd_min": min(visit["mjd"] for visit in group_visits),
+                        "mjd_max": max(visit["mjd"] for visit in group_visits),
+                        "visit_ids": [visit["visit_id"] for visit in group_visits],
                         # A derived grouping keeps one representative frame per
                         # band so the secondary survey compare still works.
-                        "frames": json.loads(json.dumps(members[-1]["frames"])),
+                        "frames": epoch_frames,
                     }
                 )
 

@@ -1,5 +1,6 @@
 export interface FrameFacts {
   visitId: string | null;
+  epoch: string | null;
   date: string | null;
   mjd: number | null;
   release: string;
@@ -73,6 +74,7 @@ export function frameFacts(
   if (!meta) return null;
   return {
     visitId: meta.visit_id ?? meta.epoch_id ?? null,
+    epoch: meta.epoch_id ?? null,
     date: meta.date ?? null,
     mjd: meta.mjd ?? meta.mjd_min ?? null,
     release: meta.release,
@@ -84,9 +86,10 @@ export function stepAccessibleName(
   position: number,
 ): string {
   if (!frame) return `Step ${position + 1}`;
+  const epoch = frame.epoch ? `, epoch ${frame.epoch}` : "";
   return (
     `Step ${position + 1}: ${visitLabel(frame)}, ${formatDate(frame.date)}, ` +
-    `${formatMjd(frame.mjd)}, ${releaseLabel(frame.release)}`
+    `${formatMjd(frame.mjd)}, ${releaseLabel(frame.release)}${epoch}`
   );
 }
 

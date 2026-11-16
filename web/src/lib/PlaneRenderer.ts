@@ -1,6 +1,6 @@
 import { TEXTURE_FORMAT, type DecodedPlane } from "./spx1.ts";
 
-export type RenderMode = "single" | "difference";
+export type RenderMode = "single" | "difference" | "difference-plane" | "rgb";
 export type RenderPreset = "linear" | "asinh" | "log";
 
 export interface RendererWindow {
@@ -29,11 +29,13 @@ in vec2 vUv;
 out vec4 outColor;
 uniform sampler2D uA;
 uniform sampler2D uB;
+uniform sampler2D uC;
 uniform int uMode;
 uniform int uPreset;
 uniform float uLo;
 uniform float uHi;
 uniform float uSigma;
+uniform float uDiffSigma;
 
 float windowT(float value) {
   float span = max(uHi - uLo, 1e-6);
@@ -59,6 +61,13 @@ vec3 colorRamp(float t) {
   return mix(mid, high, (t - 0.5) * 2.0);
 }
 
+vec3 differenceColor(float d) {
+  vec3 negative = vec3(0.96, 0.55, 0.18);
+  vec3 zero = vec3(0.02, 0.02, 0.03);
+  vec3 positive = vec3(0.20, 0.65, 1.0);
+  return d < 0.0 ? mix(zero, negative, -d) : mix(zero, positive, d);
+}
+
 void main() {
   vec2 uv = vec2(vUv.x, 1.0 - vUv.y);
   float a = texture(uA, uv).r;
@@ -69,12 +78,29 @@ void main() {
       return;
     }
     float span = max(uHi - uLo, 1e-6);
-    float d = clamp((b - a) / span, -1.0, 1.0);
-    vec3 negative = vec3(0.96, 0.55, 0.18);
-    vec3 zero = vec3(0.02, 0.02, 0.03);
-    vec3 positive = vec3(0.20, 0.65, 1.0);
-    vec3 color = d < 0.0 ? mix(zero, negative, -d) : mix(zero, positive, d);
-    outColor = vec4(color, 1.0);
+    outColor = vec4(differenceColor(clamp((b - a) / span, -1.0, 1.0)), 1.0);
+    return;
+  }
+  if (uMode == 2) {
+    if (isnan(a) || isinf(a)) {
+      outColor = vec4(0.45, 0.05, 0.55, 1.0);
+      return;
+    }
+    float scale = max(
+      (uDiffSigma > 0.0 ? uDiffSigma : uSigma) * 3.0,
+      1e-6
+    );
+    outColor = vec4(differenceColor(clamp(a / scale, -1.0, 1.0)), 1.0);
+    return;
+  }
+  if (uMode == 3) {
+    float b = texture(uB, uv).r;
+    float c = texture(uC, uv).r;
+    if (isnan(a) || isnan(b) || isnan(c) || isinf(a) || isinf(b) || isinf(c)) {
+      outColor = vec4(0.45, 0.05, 0.55, 1.0);
+      return;
+    }
+    outColor = vec4(windowT(a), windowT(b), windowT(c), 1.0);
     return;
   }
   if (isnan(a) || isinf(a)) {
@@ -115,8 +141,9 @@ export class PlaneRenderer {
   readonly canvas: HTMLCanvasElement;
   private gl: WebGL2RenderingContext;
   private program: WebGLProgram;
-  private textures: [WebGLTexture, WebGLTexture];
+  private textures: [WebGLTexture, WebGLTexture, WebGLTexture];
   private window: RendererWindow = { lo: 0, hi: 1, s: 0.1 };
+  private diffSigma = 0;
   private mode: RenderMode = "single";
   private preset: RenderPreset = "linear";
   private uniforms: Record<string, WebGLUniformLocation | null>;
@@ -162,18 +189,25 @@ export class PlaneRenderer {
     gl.enableVertexAttribArray(position);
     gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
 
-    this.textures = [this.makeTexture(), this.makeTexture()];
+    this.textures = [
+      this.makeTexture(),
+      this.makeTexture(),
+      this.makeTexture(),
+    ];
     this.uniforms = {
       uA: gl.getUniformLocation(program, "uA"),
       uB: gl.getUniformLocation(program, "uB"),
+      uC: gl.getUniformLocation(program, "uC"),
       uMode: gl.getUniformLocation(program, "uMode"),
       uPreset: gl.getUniformLocation(program, "uPreset"),
       uLo: gl.getUniformLocation(program, "uLo"),
       uHi: gl.getUniformLocation(program, "uHi"),
       uSigma: gl.getUniformLocation(program, "uSigma"),
+      uDiffSigma: gl.getUniformLocation(program, "uDiffSigma"),
     };
     gl.uniform1i(this.uniforms.uA, 0);
     gl.uniform1i(this.uniforms.uB, 1);
+    gl.uniform1i(this.uniforms.uC, 2);
     canvas.dataset.textureFormat = TEXTURE_FORMAT.internalFormat;
   }
 
@@ -193,6 +227,10 @@ export class PlaneRenderer {
     this.window = { lo: window.lo, hi: window.hi, s: window.s };
   }
 
+  setDifferenceSigma(sigma: number): void {
+    this.diffSigma = Number.isFinite(sigma) && sigma > 0 ? sigma : 0;
+  }
+
   setMode(mode: RenderMode): void {
     this.mode = mode;
   }
@@ -201,12 +239,14 @@ export class PlaneRenderer {
     this.preset = preset;
   }
 
-  setPlane(plane: DecodedPlane, slot: 0 | 1): void {
+  setPlane(plane: DecodedPlane, slot: 0 | 1 | 2): void {
     if (plane.header.dtype !== 1) {
       throw new RendererError("only float16 SPX1 planes may be uploaded");
     }
     const gl = this.gl;
-    gl.activeTexture(slot === 0 ? gl.TEXTURE0 : gl.TEXTURE1);
+    gl.activeTexture(
+      slot === 0 ? gl.TEXTURE0 : slot === 1 ? gl.TEXTURE1 : gl.TEXTURE2,
+    );
     gl.bindTexture(gl.TEXTURE_2D, this.textures[slot]);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.texImage2D(
@@ -233,11 +273,18 @@ export class PlaneRenderer {
     }
     gl.viewport(0, 0, width, height);
     gl.useProgram(this.program);
-    gl.uniform1i(this.uniforms.uMode, this.mode === "difference" ? 1 : 0);
+    const modeIndex: Record<RenderMode, number> = {
+      single: 0,
+      difference: 1,
+      "difference-plane": 2,
+      rgb: 3,
+    };
+    gl.uniform1i(this.uniforms.uMode, modeIndex[this.mode]);
     gl.uniform1i(this.uniforms.uPreset, PRESET_INDEX[this.preset]);
     gl.uniform1f(this.uniforms.uLo, this.window.lo);
     gl.uniform1f(this.uniforms.uHi, this.window.hi);
     gl.uniform1f(this.uniforms.uSigma, this.window.s);
+    gl.uniform1f(this.uniforms.uDiffSigma, this.diffSigma);
     gl.clearColor(0.02, 0.02, 0.03, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.drawArrays(gl.TRIANGLES, 0, 3);

@@ -5,9 +5,14 @@ Note: API is public, read-only, and unauthenticated.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 import re
 import shutil
+import tempfile
+import zlib
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -15,8 +20,10 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+from starlette.middleware.gzip import GZipMiddleware
 
 from drift.config import Settings
+from drift.cubes import DifferenceStack
 from drift.manifest import (
     Manifest,
     ManifestError,
@@ -27,15 +34,63 @@ from drift.manifest import (
     load_latest,
     window_sha256,
 )
+from drift.planes import decode_plane, encode_plane
 
 logger = logging.getLogger("drift.api")
 
 SAFE_FILENAME = re.compile(r"^[A-Za-z0-9_.-]+\.spx$")
+DERIVED_FILENAME = re.compile(r"^[a-f0-9]{64}\.spx$")
 DEFAULT_BLINK_BINS = 8
 MAX_BLINK_BINS = 16
 BLINK_PLANE_BUDGET = 16
 DEFAULT_TIMELINE_VISITS = 8
 MIN_TIMELINE_VISITS = 2
+COMPRESSED_BODY_BUDGET = 8 * 1024 * 1024
+MIN_RESOLUTION = 64
+RGB_CHANNELS = ("r", "g", "b")
+
+
+@dataclass(frozen=True)
+class BudgetPlan:
+    """The number and resolution selected for a response."""
+
+    count: int
+    resolution: int
+    thinned: bool
+    resolution_reduced: bool
+
+
+@dataclass(frozen=True)
+class Budget:
+    """Limits for the number and compressed size of response planes."""
+
+    max_planes: int = BLINK_PLANE_BUDGET
+    max_compressed_bytes: int = COMPRESSED_BODY_BUDGET
+
+    def adaptive_bins(self, epoch_count: int) -> int:
+        """Return the number of bins that fits for the given epoch count."""
+        if epoch_count <= 0:
+            return 0
+        return max(1, min(DEFAULT_BLINK_BINS, self.max_planes // epoch_count))
+
+    def plan(
+        self,
+        available: int,
+        requested: int,
+        compressed_at_full_resolution: int,
+    ) -> BudgetPlan:
+        count = min(available, requested, self.max_planes)
+        resolution = 512
+        compressed = compressed_at_full_resolution
+        while compressed > self.max_compressed_bytes and resolution > MIN_RESOLUTION:
+            resolution //= 2
+            compressed //= 4
+        return BudgetPlan(
+            count=count,
+            resolution=resolution,
+            thinned=count < available,
+            resolution_reduced=resolution < 512,
+        )
 
 
 class HealthResponse(BaseModel):
@@ -366,6 +421,35 @@ def _thin(items: list[Any], count: int) -> list[Any]:
     return [items[index] for index in sorted(indexes)]
 
 
+def _thin_over_mjd(rows: list[Any], count: int) -> list[Any]:
+    """Select visits spread across the MJD range."""
+    if len(rows) <= count:
+        return rows
+    if count <= 1:
+        return [rows[len(rows) // 2]]
+
+    if any(row[0].mjd is None for row in rows):
+        # Without a time coordinate there is no honest MJD axis; fall back to
+        # list-uniform thinning rather than treating a missing MJD as 0.
+        return _thin(rows, count)
+    mjds = [float(row[0].mjd) for row in rows]
+    start, end = min(mjds), max(mjds)
+    if end <= start:
+        return _thin(rows, count)
+
+    chosen: list[int] = []
+    used: set[int] = set()
+    for step in range(count):
+        target = start + (end - start) * step / (count - 1)
+        index = min(
+            (index for index in range(len(rows)) if index not in used),
+            key=lambda index: (abs(mjds[index] - target), index),
+        )
+        chosen.append(index)
+        used.add(index)
+    return [rows[index] for index in sorted(chosen)]
+
+
 def _window_payload(
     manifest: Manifest, target: Target | None = None, band: int | None = None
 ) -> dict[str, Any]:
@@ -402,19 +486,145 @@ def _plane_payload(
         "dlambda_um": dlambda_um,
         "width": processing["plane_px"],
         "height": processing["plane_px"],
+        "pixel_scale_arcsec": processing["pixel_scale_arcsec"],
         "dtype": "float16",
         "href": f"/api/v1/snapshots/{manifest.snapshot_id}/planes/{filename}",
         "static_href": f"/v1/{manifest.snapshot_id}/planes/{filename}",
         "bytes": frame.bytes,
         "sha256": frame.sha256,
+        "sigma": frame.sigma,
+        "flag_bad_frac": frame.flag_bad_frac,
         "source_url": frame.source_url,
         "saturated": frame.saturated,
         "window_sha256": window_hash,
     }
 
 
+def _source_plane_path(
+    manifest: Manifest, frame: Any, snapshot_dir: Path | None
+) -> Path:
+    if snapshot_dir is None:
+        raise HTTPException(status_code=503, detail="snapshot directory unavailable")
+    filename = Path(frame.href or "").name
+    if not SAFE_FILENAME.fullmatch(filename):
+        raise HTTPException(
+            status_code=503,
+            detail=f"snapshot has an unsafe plane path for band {frame.band}",
+        )
+    path = Path(snapshot_dir) / "v1" / manifest.snapshot_id / "planes" / filename
+    if not path.is_file():
+        raise HTTPException(
+            status_code=503, detail=f"snapshot plane {filename} is missing"
+        )
+    return path
+
+
+def _store_derived(
+    manifest: Manifest, body: bytes, cache_dir: Path | None
+) -> tuple[str, str, int]:
+    """Store a derived plane by content hash and return its URL."""
+    if cache_dir is None:
+        raise HTTPException(status_code=503, detail="derived plane cache unavailable")
+    digest = hashlib.sha256(body).hexdigest()
+    filename = f"{digest}.spx"
+    root = Path(cache_dir) / "derived" / manifest.snapshot_id
+    path = root / filename
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        if not path.is_file():
+            descriptor, temporary = tempfile.mkstemp(
+                dir=root, prefix=f".{digest}.", suffix=".tmp"
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(body)
+                Path(temporary).replace(path)
+            except BaseException:
+                Path(temporary).unlink(missing_ok=True)
+                raise
+    except OSError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"derived plane cache is unavailable: {exc}",
+        ) from exc
+    href = f"/api/v1/snapshots/{manifest.snapshot_id}/derived/{filename}"
+    return href, digest, len(body)
+
+
+def _compressed_bytes(bodies: list[bytes]) -> int:
+    # zlib is deliberately conservative: if this fits, a brotli body does too.
+    return sum(len(zlib.compress(body, 6)) for body in bodies)
+
+
+def _fit_plane_bodies(
+    manifest: Manifest,
+    planes: list[dict[str, Any]],
+    bodies: list[bytes],
+    cache_dir: Path | None,
+) -> tuple[int, bool]:
+    """Reduce plane resolution when the compressed response is too large."""
+    budget = Budget()
+    resolution = max((int(plane.get("width") or 0) for plane in planes), default=0)
+    compressed = _compressed_bytes(bodies)
+    planned = budget.plan(
+        available=len(bodies),
+        requested=len(bodies),
+        compressed_at_full_resolution=compressed,
+    )
+    reduced = False
+    if not planned.resolution_reduced:
+        return compressed, False
+    while compressed > budget.max_compressed_bytes and resolution > MIN_RESOLUTION:
+        decoded = [decode_plane(body) for body in bodies]
+        bodies = [
+            encode_plane(
+                item.pixels[::2, ::2],
+                channels=item.header.channels,
+                frame_index=item.header.frame_index,
+            )
+            for item in decoded
+        ]
+        resolution = max(1, resolution // 2)
+        compressed = _compressed_bytes(bodies)
+        reduced = True
+
+    if reduced:
+        for plane, body in zip(planes, bodies, strict=True):
+            href, digest, size = _store_derived(manifest, body, cache_dir)
+            item = decode_plane(body)
+            plane.update(
+                {
+                    "href": href,
+                    "static_href": href,
+                    "sha256": digest,
+                    "bytes": size,
+                    "width": item.header.width,
+                    "height": item.header.height,
+                    "pixel_scale_arcsec": float(plane.get("pixel_scale_arcsec") or 0.0)
+                    * (
+                        int(plane.get("width") or item.header.width) / item.header.width
+                    ),
+                    "resolution_reduced": True,
+                }
+            )
+    return compressed, reduced
+
+
+def _epoch_for_visit(target: Target, visit: Any) -> str | None:
+    for epoch in target.epochs:
+        if visit.visit_id in epoch.visit_ids:
+            return epoch.epoch_id
+    return visit.release
+
+
 def _timeline_frames(
-    manifest: Manifest, target: Target, band: int | None, requested: int
+    manifest: Manifest,
+    target: Target,
+    band: int | None,
+    requested: int,
+    *,
+    snapshot_dir: Path | None = None,
+    cache_dir: Path | None = None,
 ) -> dict[str, Any]:
     resolved = _resolve_band(target, band)
     if resolved is None:
@@ -426,7 +636,12 @@ def _timeline_frames(
     if reason:
         raise HTTPException(status_code=409, detail=reason)
 
-    selected = _thin(rows, min(requested, MAX_BLINK_BINS))
+    planned = Budget().plan(
+        available=len(rows),
+        requested=requested,
+        compressed_at_full_resolution=0,
+    )
+    selected = _thin_over_mjd(rows, planned.count)
     kept_ids = {visit.visit_id for visit, _ in selected}
     omitted = [visit.visit_id for visit, _ in rows if visit.visit_id not in kept_ids]
     window = _window_payload(manifest, target, resolved)
@@ -435,11 +650,13 @@ def _timeline_frames(
 
     planes: list[dict[str, Any]] = []
     visits: list[dict[str, Any]] = []
+    bodies: list[bytes] = []
     for visit, frame in selected:
         plane = _plane_payload(manifest, frame, window_hash, len(planes))
         plane.update(
             {
                 "visit_id": visit.visit_id,
+                "epoch_id": _epoch_for_visit(target, visit),
                 "mjd": visit.mjd,
                 "date": visit.date,
                 "release": visit.release,
@@ -449,9 +666,14 @@ def _timeline_frames(
             }
         )
         planes.append(plane)
+        if snapshot_dir is not None:
+            bodies.append(
+                _source_plane_path(manifest, frame, snapshot_dir).read_bytes()
+            )
         visits.append(
             {
                 "visit_id": visit.visit_id,
+                "epoch_id": _epoch_for_visit(target, visit),
                 "mjd": visit.mjd,
                 "date": visit.date,
                 "release": visit.release,
@@ -461,6 +683,10 @@ def _timeline_frames(
             }
         )
 
+    if bodies and len(bodies) == len(planes):
+        compressed, reduced = _fit_plane_bodies(manifest, planes, bodies, cache_dir)
+    else:
+        compressed, reduced = 0, False
     mjds = [visit.mjd for visit, _ in selected if visit.mjd is not None]
     return {
         "snapshot_id": manifest.snapshot_id,
@@ -473,13 +699,299 @@ def _timeline_frames(
         "visits_requested": requested,
         "visits": len(selected),
         "available_visits": len(rows),
-        "degraded": bool(omitted),
+        "plane_count": len(planes),
+        "compressed_bytes": compressed,
+        "degraded": bool(omitted) or reduced,
         "frames_omitted": omitted,
+        "resolution_reduced": reduced,
         "refused_frames": refused,
         "span_days": (max(mjds) - min(mjds)) if len(mjds) > 1 else 0.0,
         "visits_meta": visits,
         "window": window,
         "pixel_scale_arcsec": processing["pixel_scale_arcsec"],
+        "source_plane_px": processing["plane_px"],
+        "units": processing["units"],
+        "planes": planes,
+    }
+
+
+def _visit_index(rows: list[Any], value: str | int | None, *, what: str) -> int:
+    if value is None or value == "":
+        return 0
+    text = str(value)
+    for index, (visit, _frame) in enumerate(rows):
+        if visit.visit_id == text:
+            return index
+    try:
+        index = int(text)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{what} {text!r} is not a visit in this stack",
+        ) from exc
+    if index < 0 or index >= len(rows):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{what} index {index} is outside the stack",
+        )
+    return index
+
+
+def _visit_meta(visit: Any, frame: Any) -> dict[str, Any]:
+    return {
+        "visit_id": visit.visit_id,
+        "mjd": visit.mjd,
+        "date": visit.date,
+        "release": visit.release,
+        "survey": visit.survey,
+        "collection": visit.collection,
+        "obs_publisher_did": visit.obs_publisher_did,
+        "detector": frame.detector or visit.detector,
+        "band": frame.band,
+        "sigma": frame.sigma,
+        "lambda_um": frame.lambda_um,
+        "dlambda_um": frame.dlambda_um,
+    }
+
+
+def _diff_frames(
+    manifest: Manifest,
+    target: Target,
+    band: int | None,
+    reference: str | None,
+    visit: str | None,
+    *,
+    snapshot_dir: Path | None = None,
+    cache_dir: Path | None = None,
+) -> dict[str, Any]:
+    resolved = _resolve_band(target, band)
+    if resolved is None:
+        raise HTTPException(
+            status_code=409, detail="No band is available for a difference view."
+        )
+    rows, detector, refused = _stack(target, resolved)
+    reason = _timeline_reason(target, resolved)
+    if reason:
+        raise HTTPException(status_code=409, detail=reason)
+
+    reference_index = _visit_index(rows, reference, what="reference visit")
+    reference_visit, reference_frame = rows[reference_index]
+    if visit is None:
+        candidates = [row for index, row in enumerate(rows) if index != reference_index]
+        # The reference plane is part of the diff response's provenance, so
+        # leave one slot for it inside the 16-plane stack budget.
+        thinned = _thin_over_mjd(candidates, MAX_BLINK_BINS - 1)
+    else:
+        current_index = _visit_index(rows, visit, what="current visit")
+        if current_index == reference_index:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "The difference reference and the selected visit are the "
+                    "same; choose another visit."
+                ),
+            )
+        thinned = [rows[current_index]]
+
+    if visit is None:
+        kept_ids = {visit_item.visit_id for visit_item, _frame in thinned}
+        omitted = [
+            visit_item.visit_id
+            for visit_item, _frame in rows
+            if visit_item.visit_id not in kept_ids
+            and visit_item.visit_id != reference_visit.visit_id
+        ]
+    else:
+        omitted = []
+
+    reference_path = _source_plane_path(manifest, reference_frame, snapshot_dir)
+    reference_plane = decode_plane(reference_path.read_bytes())
+    window = _window_payload(manifest, target, resolved)
+    window_hash = str(window["sha256"])
+    processing = _processing(manifest)
+
+    planes: list[dict[str, Any]] = []
+    bodies: list[bytes] = []
+    for current_visit, current_frame in thinned:
+        current_path = _source_plane_path(manifest, current_frame, snapshot_dir)
+        current_plane = decode_plane(current_path.read_bytes())
+        difference = DifferenceStack(
+            reference_sigma=reference_frame.sigma,
+            current_sigma=current_frame.sigma,
+        ).difference(reference_plane.pixels, current_plane.pixels)
+        body = encode_plane(
+            difference.image,
+            channels=int(current_frame.band or 0),
+            frame_index=len(planes),
+        )
+        href, digest, size = _store_derived(manifest, body, cache_dir)
+        planes.append(
+            {
+                **_plane_payload(
+                    manifest,
+                    current_frame,
+                    window_hash,
+                    len(planes),
+                ),
+                "href": href,
+                "static_href": href,
+                "sha256": digest,
+                "bytes": size,
+                "width": current_plane.header.width,
+                "height": current_plane.header.height,
+                "difference": True,
+                "role": "difference",
+                "reference_visit_id": reference_visit.visit_id,
+                "source_sigma": current_frame.sigma,
+                "reference_sigma": reference_frame.sigma,
+                "sigma_squared": difference.sigma_squared,
+                "sigma": difference.sigma,
+                "saturated": bool(current_frame.saturated or reference_frame.saturated),
+                "reference_saturated": bool(reference_frame.saturated),
+                "flag_bad_frac": max(
+                    float(current_frame.flag_bad_frac or 0.0),
+                    float(reference_frame.flag_bad_frac or 0.0),
+                ),
+                "cross_release": (current_visit.release != reference_visit.release),
+                "reference_lambda_um": reference_frame.lambda_um,
+                "bandpass_delta_um": abs(
+                    float(current_frame.lambda_um or 0.0)
+                    - float(reference_frame.lambda_um or 0.0)
+                ),
+                "bandpass_fraction": (
+                    abs(
+                        float(current_frame.lambda_um or 0.0)
+                        - float(reference_frame.lambda_um or 0.0)
+                    )
+                    / float(current_frame.dlambda_um or 1.0)
+                ),
+                "visit_id": current_visit.visit_id,
+                "epoch_id": _epoch_for_visit(target, current_visit),
+                "mjd": current_visit.mjd,
+                "date": current_visit.date,
+                "release": current_visit.release,
+                "survey": current_visit.survey,
+                "collection": current_visit.collection,
+                "obs_publisher_did": current_visit.obs_publisher_did,
+            }
+        )
+        bodies.append(body)
+
+    compressed, reduced = _fit_plane_bodies(manifest, planes, bodies, cache_dir)
+    return {
+        "snapshot_id": manifest.snapshot_id,
+        "fixture": is_fixture_manifest(manifest),
+        "target_id": target.id,
+        "mode": "diff",
+        "band": resolved,
+        "detector": detector,
+        "reference": {
+            **_visit_meta(reference_visit, reference_frame),
+            "index": reference_index,
+            "href": (
+                f"/api/v1/snapshots/{manifest.snapshot_id}/planes/"
+                f"{Path(reference_frame.href or '').name}"
+            ),
+        },
+        "visits_requested": len(thinned),
+        "visits": len(thinned),
+        "available_visits": len(rows) - 1,
+        "plane_count": len(planes),
+        "compressed_bytes": compressed,
+        "degraded": bool(omitted) or reduced,
+        "frames_omitted": omitted,
+        "resolution_reduced": reduced,
+        "cross_release": any(bool(plane["cross_release"]) for plane in planes),
+        "max_bandpass_fraction": max(
+            (float(plane["bandpass_fraction"]) for plane in planes), default=0.0
+        ),
+        "refused_frames": refused,
+        "window": window,
+        "pixel_scale_arcsec": processing["pixel_scale_arcsec"],
+        "source_plane_px": processing["plane_px"],
+        "units": processing["units"],
+        "planes": planes,
+    }
+
+
+def _rgb_frames(
+    manifest: Manifest,
+    target: Target,
+    band: int | None,
+    *,
+    snapshot_dir: Path | None = None,
+    cache_dir: Path | None = None,
+) -> dict[str, Any]:
+    resolved = _resolve_band(target, band)
+    if resolved is None:
+        raise HTTPException(
+            status_code=409, detail="No band is available for temporal RGB."
+        )
+    rows, detector, refused = _stack(target, resolved)
+    if len(rows) < 3:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Temporal RGB needs three visits at band {resolved}; this stack "
+                f"has {len(rows)}. Change band or choose a target with three visits."
+            ),
+        )
+
+    selected = _thin_over_mjd(rows, 3)
+    kept_ids = {visit.visit_id for visit, _frame in selected}
+    omitted = [
+        visit.visit_id for visit, _frame in rows if visit.visit_id not in kept_ids
+    ]
+    window = _window_payload(manifest, target, resolved)
+    window_hash = str(window["sha256"])
+    processing = _processing(manifest)
+    planes: list[dict[str, Any]] = []
+    bodies: list[bytes] = []
+    for channel, (visit, frame) in zip(RGB_CHANNELS, selected, strict=True):
+        plane = _plane_payload(manifest, frame, window_hash, len(planes))
+        plane.update(
+            {
+                "channel": channel,
+                "role": "rgb",
+                "visit_id": visit.visit_id,
+                "epoch_id": _epoch_for_visit(target, visit),
+                "mjd": visit.mjd,
+                "date": visit.date,
+                "release": visit.release,
+                "survey": visit.survey,
+                "collection": visit.collection,
+                "obs_publisher_did": visit.obs_publisher_did,
+            }
+        )
+        planes.append(plane)
+        if snapshot_dir is not None:
+            bodies.append(
+                _source_plane_path(manifest, frame, snapshot_dir).read_bytes()
+            )
+
+    if bodies and len(bodies) == len(planes):
+        compressed, reduced = _fit_plane_bodies(manifest, planes, bodies, cache_dir)
+    else:
+        compressed, reduced = 0, False
+    return {
+        "snapshot_id": manifest.snapshot_id,
+        "fixture": is_fixture_manifest(manifest),
+        "target_id": target.id,
+        "mode": "rgb",
+        "band": resolved,
+        "detector": detector,
+        "channels": list(RGB_CHANNELS),
+        "visits": len(selected),
+        "available_visits": len(rows),
+        "plane_count": len(planes),
+        "compressed_bytes": compressed,
+        "degraded": bool(omitted) or reduced,
+        "frames_omitted": omitted,
+        "resolution_reduced": reduced,
+        "refused_frames": refused,
+        "window": window,
+        "pixel_scale_arcsec": processing["pixel_scale_arcsec"],
+        "source_plane_px": processing["plane_px"],
         "units": processing["units"],
         "planes": planes,
     }
@@ -494,13 +1006,43 @@ def frames_payload(
     band: int | None = None,
     visits: int = DEFAULT_TIMELINE_VISITS,
     reference: str | None = None,
+    visit: str | None = None,
+    epochs: str | None = None,
+    snapshot_dir: Path | None = None,
+    cache_dir: Path | None = None,
 ) -> dict[str, Any]:
     if mode == "timeline":
-        return _timeline_frames(manifest, _target(manifest, target_id), band, visits)
-    if mode in {"diff", "night_pair"}:
+        return _timeline_frames(
+            manifest,
+            _target(manifest, target_id),
+            band,
+            visits,
+            snapshot_dir=snapshot_dir,
+            cache_dir=cache_dir,
+        )
+    target = _target(manifest, target_id)
+    if mode == "diff":
+        return _diff_frames(
+            manifest,
+            target,
+            band,
+            reference,
+            visit,
+            snapshot_dir=snapshot_dir,
+            cache_dir=cache_dir,
+        )
+    if mode == "rgb":
+        return _rgb_frames(
+            manifest,
+            target,
+            band,
+            snapshot_dir=snapshot_dir,
+            cache_dir=cache_dir,
+        )
+    if mode == "night_pair":
         raise HTTPException(
             status_code=409,
-            detail=f"mode {mode!r} is not available in this snapshot",
+            detail="mode 'night_pair' is not available in this snapshot",
         )
     if mode == "spectrum":
         raise HTTPException(
@@ -510,31 +1052,81 @@ def frames_payload(
     if mode not in {"epoch", "survey_compare"}:
         raise HTTPException(status_code=400, detail=f"unknown mode {mode!r}")
 
-    target = _target(manifest, target_id)
-    if len(target.epochs) < 2:
+    ordered_epochs = sorted(
+        target.epochs, key=lambda epoch: (epoch.mjd_min or 0.0, epoch.epoch_id)
+    )
+    if len(ordered_epochs) < 2:
         raise HTTPException(
             status_code=409,
             detail="Only one survey epoch is available; survey compare needs two.",
         )
-    epochs = sorted(
-        target.epochs, key=lambda epoch: (epoch.mjd_min or 0.0, epoch.epoch_id)
-    )
-    pair = [epochs[0], epochs[-1]]
-    shared = _shared_bands(pair)
+    if epochs is not None and epochs.strip().lower() == "all":
+        selected_epochs = list(ordered_epochs)
+    elif epochs:
+        selected_epochs = []
+        for token in (part.strip() for part in epochs.split(",")):
+            if not token:
+                continue
+            match = next(
+                (epoch for epoch in ordered_epochs if epoch.epoch_id == token), None
+            )
+            if match is None:
+                try:
+                    match = ordered_epochs[int(token)]
+                except (ValueError, IndexError) as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"epoch {token!r} is not in this target's timeline",
+                    ) from exc
+            if match not in selected_epochs:
+                selected_epochs.append(match)
+        if len(selected_epochs) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail="a survey compare needs two epochs; specify two or more",
+            )
+        selected_epochs.sort(key=lambda epoch: (epoch.mjd_min or 0.0, epoch.epoch_id))
+    else:
+        # The compare surface is a two-epoch blink by default; an explicit
+        # ``epochs=all`` asks for the adaptive 8 x 2 / 5 x 3 / 4 x 4 stack.
+        selected_epochs = [ordered_epochs[0], ordered_epochs[-1]]
+
+    budget = Budget()
+    omitted_epochs: list[str] = []
+    if len(selected_epochs) > budget.max_planes:
+        omitted_epochs = [
+            f"epoch {epoch.epoch_id}" for epoch in selected_epochs[budget.max_planes :]
+        ]
+        selected_epochs = selected_epochs[: budget.max_planes]
+
+    shared = _shared_bands(selected_epochs)
     if not shared:
         raise HTTPException(
-            status_code=409, detail="No wavelengths are matched across two epochs."
+            status_code=409, detail="No wavelengths are matched across these epochs."
         )
 
     by_band: list[tuple[int, Any]] = []
-    first_frames = {item.band: item for item in pair[0].frames if item.band is not None}
+    first_frames = {
+        item.band: item for item in selected_epochs[0].frames if item.band is not None
+    }
     for band in shared:
         frame = first_frames.get(band)
         if frame is not None:
             by_band.append((band, frame))
     by_band.sort(key=lambda item: (item[1].lambda_um or 0.0, item[0]))
-    budget = max(1, BLINK_PLANE_BUDGET // len(pair))
-    selected: list[tuple[int, Any]] = _thin(by_band, min(bins, budget))
+    budget_bins = budget.adaptive_bins(len(selected_epochs))
+    requested_bins = min(bins, len(by_band))
+    requested_bands = _thin(by_band, requested_bins)
+    selected: list[tuple[int, Any]] = _thin(
+        requested_bands, min(len(requested_bands), budget_bins)
+    )
+    selected_bands = {item[0] for item in selected}
+    # Only bands the budget forced out are omitted; asking for four bins from
+    # an eight-band target is not degradation.
+    omitted_bins = [
+        f"band {band}" for band, _frame in requested_bands if band not in selected_bands
+    ]
+    omitted = omitted_epochs + omitted_bins
 
     # A real compare stack usually shares one matched band, so use that band's
     # window rather than the snapshot-wide fallback (which is another target's
@@ -545,10 +1137,11 @@ def frames_payload(
     window_hash = str(window["sha256"])
     processing = _processing(manifest)
     planes: list[dict[str, Any]] = []
+    bodies: list[bytes] = []
     for band_index, item in enumerate(selected):
         band = item[0]
         band_reference: Any = item[1]
-        for epoch in pair:
+        for epoch in selected_epochs:
             plane_frame: Any = next(
                 (item for item in epoch.frames if item.band == band),
                 None,
@@ -574,18 +1167,21 @@ def frames_payload(
                     "epoch_id": epoch.epoch_id,
                     "release": epoch.release,
                     "survey": epoch.survey,
+                    "detector": plane_frame.detector or extra.get("detector"),
                     "mjd_min": epoch.mjd_min,
                     "mjd_max": epoch.mjd_max,
                     "visit_id": extra.get("visit_id"),
                     "mjd": extra.get("mjd"),
                     "date": extra.get("date"),
                     "saturated": plane_frame.saturated,
+                    "sigma": plane_frame.sigma,
                     "lambda_um": lambda_um,
                     "lambda_lo_um": lambda_um - dlambda_um / 2.0,
                     "lambda_hi_um": lambda_um + dlambda_um / 2.0,
                     "dlambda_um": dlambda_um,
                     "width": processing["plane_px"],
                     "height": processing["plane_px"],
+                    "pixel_scale_arcsec": processing["pixel_scale_arcsec"],
                     "dtype": "float16",
                     "href": (
                         f"/api/v1/snapshots/{manifest.snapshot_id}/planes/{filename}"
@@ -597,7 +1193,15 @@ def frames_payload(
                     "window_sha256": window_hash,
                 }
             )
+            if snapshot_dir is not None:
+                bodies.append(
+                    _source_plane_path(manifest, plane_frame, snapshot_dir).read_bytes()
+                )
 
+    if bodies and len(bodies) == len(planes):
+        compressed, reduced = _fit_plane_bodies(manifest, planes, bodies, cache_dir)
+    else:
+        compressed, reduced = 0, False
     return {
         "snapshot_id": manifest.snapshot_id,
         "fixture": is_fixture_manifest(manifest),
@@ -605,6 +1209,11 @@ def frames_payload(
         "mode": mode,
         "bins": len(selected),
         "requested_bins": bins,
+        "plane_count": len(planes),
+        "compressed_bytes": compressed,
+        "degraded": bool(omitted) or reduced,
+        "frames_omitted": omitted,
+        "resolution_reduced": reduced,
         "epochs": [
             {
                 "epoch_id": epoch.epoch_id,
@@ -613,10 +1222,11 @@ def frames_payload(
                 "mjd_min": epoch.mjd_min,
                 "mjd_max": epoch.mjd_max,
             }
-            for epoch in pair
+            for epoch in selected_epochs
         ],
         "window": window,
         "pixel_scale_arcsec": processing["pixel_scale_arcsec"],
+        "source_plane_px": processing["plane_px"],
         "units": processing["units"],
         "planes": planes,
     }
@@ -632,6 +1242,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         redoc_url=None,
         openapi_url=None,
     )
+    # The blink payload is float16 planes; browsers accept gzip, and without
+    # this the "compressed body" budget would describe bytes never sent.
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
 
     @app.exception_handler(Exception)
     async def unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
@@ -674,6 +1287,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             DEFAULT_TIMELINE_VISITS, ge=MIN_TIMELINE_VISITS, le=MAX_BLINK_BINS
         ),
         reference: str | None = Query(None),
+        visit: str | None = Query(None),
+        epochs: str | None = Query(None),
     ) -> dict[str, Any]:
         current = _current_manifest(resolved)
         payload = frames_payload(
@@ -684,11 +1299,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             band=band,
             visits=visits,
             reference=reference,
+            visit=visit,
+            epochs=epochs,
+            snapshot_dir=resolved.snapshot_dir,
+            cache_dir=resolved.cache_dir,
         )
-        if payload.get("degraded"):
-            response.headers["X-Spx-Degraded"] = "1"
-        else:
-            response.headers["X-Spx-Degraded"] = "0"
+        response.headers["X-Spx-Degraded"] = "1" if payload.get("degraded") else "0"
         return payload
 
     @app.get("/api/v1/snapshots/{snapshot_id}/planes/{filename}")
@@ -700,6 +1316,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         path = (planes_root / filename).resolve()
         if path.parent != planes_root or not path.is_file():
             raise HTTPException(status_code=404, detail="plane not found")
+        return FileResponse(
+            path,
+            media_type="application/octet-stream",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
+
+    @app.get("/api/v1/snapshots/{snapshot_id}/derived/{filename}")
+    def derived_plane(snapshot_id: str, filename: str) -> FileResponse:
+        current = _current_manifest(resolved)
+        if snapshot_id != current.snapshot_id or not DERIVED_FILENAME.fullmatch(
+            filename
+        ):
+            raise HTTPException(status_code=404, detail="derived plane not found")
+        root = (Path(resolved.cache_dir) / "derived" / snapshot_id).resolve()
+        path = (root / filename).resolve()
+        if path.parent != root or not path.is_file():
+            raise HTTPException(status_code=404, detail="derived plane not found")
         return FileResponse(
             path,
             media_type="application/octet-stream",

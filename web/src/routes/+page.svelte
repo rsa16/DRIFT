@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
 
+  import DegradedBanner from "$lib/components/DegradedBanner.svelte";
   import Dock from "$lib/components/Dock.svelte";
   import Header from "$lib/components/Header.svelte";
   import Rail from "$lib/components/Rail.svelte";
@@ -16,6 +17,7 @@
     type FramesResponse,
     type ManifestSummary,
     type PlaneMeta,
+    type ReferenceVisit,
     type TargetDetail,
     type TargetSummary,
   } from "$lib/api";
@@ -41,7 +43,10 @@
     bandTicks,
     canvasAltText,
     captionFacts,
+    formatDate,
+    formatMjd,
     frameFacts,
+    releaseLabel,
     visitLabel,
     type StackFacts,
   } from "$lib/format";
@@ -90,6 +95,10 @@
   });
   let stage = $state<StageMode>("timeline");
   let difference = $state<boolean>(false);
+  let rgb = $state<boolean>(false);
+  let diffPlane = $state<DecodedPlane | null>(null);
+  let diffMeta = $state<PlaneMeta | null>(null);
+  let diffReference = $state<ReferenceVisit | null>(null);
   let tone = $state<RenderPreset>("asinh");
   let fps = $state<number>(DEFAULT_FPS);
   let playing = $state<boolean>(true);
@@ -142,41 +151,90 @@
   );
   const stackMeta = $derived<PlaneMeta | undefined>(current?.meta);
   const canDifference = $derived(
-    !!current && steps.length > 1 && frameIndex !== referenceIndex,
+    !rgb && !!current && steps.length > 1 && frameIndex !== referenceIndex,
+  );
+  const canRgb = $derived(
+    stage === "timeline" && !!frames && steps.length >= 3 && !difference,
   );
   const ready = $derived(appState.kind === "ready" && frames !== null);
 
   const currentFacts = $derived(frameFacts(current?.meta));
   const referenceFacts = $derived(frameFacts(reference?.meta));
+  const diffBandpass = $derived(
+    diffMeta?.bandpass_delta_um === undefined
+      ? null
+      : {
+          deltaUm: diffMeta.bandpass_delta_um,
+          fraction: diffMeta.bandpass_fraction ?? 0,
+        },
+  );
   const stackFacts = $derived<StackFacts | null>(
     frames && stackMeta
       ? {
           detector: stackMeta.detector ?? frames.detector ?? null,
           lambdaLoUm: stackMeta.lambda_lo_um,
           lambdaHiUm: stackMeta.lambda_hi_um,
-          pixelScaleArcsec: frames.pixel_scale_arcsec,
+          pixelScaleArcsec:
+            frames.planes[0]?.pixel_scale_arcsec ??
+            frames.pixel_scale_arcsec,
           units: frames.units,
           windowSha: frames.window.sha256,
         }
       : null,
   );
-  const caption = $derived(currentFacts ? captionFacts(currentFacts) : []);
+  const caption = $derived.by(() => {
+    if (rgb && frames?.mode === "rgb") {
+      return [
+        "Temporal RGB",
+        frames.planes
+          .map(
+            (plane) =>
+              `${(plane.channel ?? "?").toUpperCase()} ` +
+              `${formatDate(plane.date).slice(0, 10)} ` +
+              `${releaseLabel(plane.release)}`,
+          )
+          .join(" · "),
+      ];
+    }
+    return currentFacts ? captionFacts(currentFacts) : [];
+  });
   const notes = $derived([
     ...(detail?.caveats ?? []),
     ...(frames?.refused_frames ?? []).map((id) => `Refused frame ${id}.`),
   ]);
   const altText = $derived.by(() => {
     if (!currentFacts || !stackFacts) return "No frame loaded.";
+    if (rgb && frames?.mode === "rgb") {
+      return (
+        `Temporal RGB composite of ${frames.planes.length} visits. ` +
+        frames.planes
+          .map(
+            (plane) =>
+              `${(plane.channel ?? "?").toUpperCase()}: visit ${plane.visit_id ?? "—"}, ` +
+              `${formatDate(plane.date)}, ${formatMjd(plane.mjd)}, ` +
+              `release ${releaseLabel(plane.release)}.`,
+          )
+          .join(" ") +
+        ` ${canvasAltText(currentFacts, stackFacts)}`
+      );
+    }
     if (difference && referenceFacts) {
+      const reference = frames?.reference;
       return (
         `Difference image: visit ${visitLabel(currentFacts)} against reference ` +
-        `${visitLabel(referenceFacts)}. ${canvasAltText(currentFacts, stackFacts)} ` +
+        `${reference?.visit_id ?? visitLabel(referenceFacts)}. ` +
+        (diffMeta?.cross_release
+          ? "This pair spans processing releases; a pipeline difference may be present. "
+          : "") +
+        `${canvasAltText(currentFacts, stackFacts)} ` +
         "Blue means brighter in the current visit, amber fainter, magenta missing pixels."
       );
     }
     return canvasAltText(currentFacts, stackFacts);
   });
-  const canvasLabel = $derived(difference ? "Difference image" : "Sky image");
+  const canvasLabel = $derived(
+    difference ? "Difference image" : rgb ? "Temporal RGB composite" : "Sky image",
+  );
   const histogram = $derived(
     buildHistogram(current?.plane ?? null, frames?.window ?? null),
   );
@@ -230,6 +288,9 @@
     rendererA?.dispose();
     rendererA = null;
     uploadedKey = "";
+    diffPlane = null;
+    diffMeta = null;
+    diffReference = null;
     frameIndex = 0;
     referenceIndex = 0;
   }
@@ -255,7 +316,7 @@
   function initBlink(): void {
     blink?.destroy();
     blink = new BlinkController(Math.max(1, steps.length), fps);
-    blink.playing = playing && !difference;
+    blink.playing = playing && !difference && !rgb;
     blink.onFrame((frame) => {
       if (difference) return;
       frameIndex = frame;
@@ -268,27 +329,50 @@
     if (!frames || !rendererA) return;
     const entry = steps[frameIndex];
     if (!entry) return;
+    if (difference && stage === "timeline" && !diffPlane) return;
     const referenceEntry = steps[referenceIndex] ?? steps[0];
     const stackKey = stage === "timeline" ? bandValue : bandIndex;
-    const key = `${stage}:${difference ? "diff" : frameIndex}:${stackKey}:${frames.window.sha256}`;
+    const key = `${stage}:${rgb ? "rgb" : difference ? `diff:${diffMeta?.sha256 ?? ""}:${referenceIndex}` : frameIndex}:${stackKey}:${frames.window.sha256}`;
     if (force || uploadedKey !== key) {
-      if (difference && referenceEntry) {
+      if (difference && stage === "timeline" && diffPlane) {
+        rendererA.setPlane(diffPlane, 0);
+      } else if (difference && referenceEntry) {
         rendererA.setPlane(referenceEntry.plane, 0);
         rendererA.setPlane(entry.plane, 1);
+      } else if (rgb && entries.length >= 3) {
+        entries.slice(0, 3).forEach((item, slot) => {
+          rendererA?.setPlane(item.plane, slot as 0 | 1 | 2);
+        });
       } else {
         rendererA.setPlane(entry.plane, 0);
       }
       uploadedKey = key;
     }
     rendererA.setWindow(frames.window);
+    rendererA.setDifferenceSigma(
+      difference && stage === "timeline"
+        ? (diffMeta?.sigma ??
+            Math.sqrt(diffMeta?.sigma_squared ?? 0))
+        : 0,
+    );
     rendererA.setPreset(tone);
-    rendererA.setMode(difference ? "difference" : "single");
+    rendererA.setMode(
+      difference
+        ? stage === "timeline"
+          ? "difference-plane"
+          : "difference"
+        : rgb
+          ? "rgb"
+          : "single",
+    );
     rendererA.draw();
     statusMessage = difference
-      ? "Difference image on."
-      : stage === "compare"
-        ? `Survey compare step ${frameIndex + 1} of ${steps.length}.`
-        : `Visit ${frameIndex + 1} of ${steps.length}.`;
+      ? `Difference image: ${currentFacts ? visitLabel(currentFacts) : "visit"} against ${frames.reference?.visit_id ?? "the reference visit"}.`
+      : rgb
+        ? "Temporal RGB composite of three visits on one window."
+        : stage === "compare"
+          ? `Survey compare step ${frameIndex + 1} of ${steps.length}.`
+          : `Visit ${frameIndex + 1} of ${steps.length}.`;
   }
 
   function redrawForResize(): void {
@@ -306,30 +390,73 @@
   }
 
   function togglePlayback(): void {
-    if (difference || !steps.length) return;
+    if (difference || rgb || !steps.length) return;
     playing = !playing;
     if (blink) blink.playing = playing;
   }
 
+  function sameReleaseReference(index: number): number {
+    const release = steps[index]?.meta.release;
+    const currentLambda = steps[index]?.meta.lambda_um;
+    let best = -1;
+    let bestDelta = Number.POSITIVE_INFINITY;
+    steps.forEach((step, position) => {
+      if (position === index || step.meta.release !== release) return;
+      if (best < 0) best = position;
+      const lambda = step.meta.lambda_um;
+      if (currentLambda === undefined || lambda === undefined) return;
+      const delta = Math.abs(currentLambda - lambda);
+      if (delta < bestDelta) {
+        best = position;
+        bestDelta = delta;
+      }
+    });
+    return best >= 0 ? best : referenceIndex;
+  }
+
   function goTo(index: number): void {
-    if (!steps.length) return;
+    if (!steps.length || rgb) return;
     frameIndex = Math.max(0, Math.min(index, steps.length - 1));
-    if (difference && frameIndex === referenceIndex) difference = false;
+    if (
+      difference &&
+      steps[referenceIndex]?.meta.release !== steps[frameIndex]?.meta.release
+    ) {
+      referenceIndex = sameReleaseReference(frameIndex);
+    }
+    if (difference && frameIndex === referenceIndex) {
+      difference = false;
+      diffPlane = null;
+      diffMeta = null;
+    diffReference = null;
+    }
     playing = false;
     if (blink) {
       blink.playing = false;
       blink.goTo(frameIndex);
     }
-    drawFrame(true);
+    if (difference) {
+      void loadDifference();
+    } else {
+      drawFrame(true);
+    }
     shareView();
   }
 
   function setReference(index: number): void {
     if (!steps.length) return;
     referenceIndex = Math.max(0, Math.min(index, steps.length - 1));
-    if (difference && frameIndex === referenceIndex) difference = false;
+    if (difference && frameIndex === referenceIndex) {
+      difference = false;
+      diffPlane = null;
+      diffMeta = null;
+    diffReference = null;
+    }
     uploadedKey = "";
-    drawFrame(true);
+    if (difference) {
+      void loadDifference();
+    } else {
+      drawFrame(true);
+    }
   }
 
   function setCompareBand(index: number): void {
@@ -346,15 +473,71 @@
     goTo(frameIndex + delta);
   }
 
-  function setDifference(next: boolean): void {
+  async function loadDifference(): Promise<void> {
+    if (!detail || !frames) return;
+    if (stage !== "timeline") {
+      drawFrame(true);
+      return;
+    }
+    statusMessage = "Computing the difference on the stack's one window…";
+    try {
+      const response = await fetchFrames(detail.id, {
+        mode: "diff",
+        band: bandValue,
+        // Steps are thinned; visit identity survives, the step index does not.
+        reference: steps[referenceIndex]?.meta.visit_id ?? referenceIndex,
+        visit: current?.meta.visit_id ?? frameIndex,
+      });
+      const plane = response.planes[0];
+      if (!plane) throw new ApiError(409, "No difference plane was returned.");
+      diffPlane = decodeSpx1(await fetchPlane(plane.href));
+      diffMeta = plane;
+      diffReference = response.reference ?? null;
+      uploadedKey = "";
+      drawFrame(true);
+    } catch (error) {
+      difference = false;
+      diffPlane = null;
+      diffMeta = null;
+    diffReference = null;
+      statusMessage =
+        error instanceof ApiError ? error.message : "Difference failed.";
+      drawFrame(true);
+    }
+  }
+
+  async function setDifference(next: boolean): Promise<void> {
     if (next && !canDifference) return;
     difference = next;
     if (next) {
       playing = false;
       if (blink) blink.playing = false;
+      if (
+        steps[referenceIndex]?.meta.release !== steps[frameIndex]?.meta.release
+      ) {
+        // A pipeline zero-point difference is not a sky change; default the
+        // reference into the current visit's release.
+        referenceIndex = sameReleaseReference(frameIndex);
+        uploadedKey = "";
+      }
+      await loadDifference();
+    } else {
+      diffPlane = null;
+      diffMeta = null;
+    diffReference = null;
+      uploadedKey = "";
+      drawFrame(true);
     }
-    uploadedKey = "";
-    drawFrame(true);
+  }
+
+  async function setRgb(next: boolean): Promise<void> {
+    if (!detail || stage !== "timeline" || rgb === next) return;
+    rgb = next;
+    difference = false;
+    diffPlane = null;
+    diffMeta = null;
+    diffReference = null;
+    await loadFrames(detail.id, bandValue);
   }
 
   async function setBandValue(band: number): Promise<void> {
@@ -367,6 +550,10 @@
     if (!detail || next === stage) return;
     stage = next;
     difference = false;
+    rgb = false;
+    diffPlane = null;
+    diffMeta = null;
+    diffReference = null;
     await loadFrames(detail.id, stage === "timeline" ? bandValue : null);
   }
 
@@ -407,12 +594,19 @@
     try {
       const response =
         stage === "timeline"
-          ? await fetchFrames(id, {
-              mode: "timeline",
-              band,
-              visits: DEFAULT_VISITS,
-            })
-          : await fetchFrames(id, { mode: "epoch", bins: 8 });
+          ? await fetchFrames(
+              id,
+              rgb
+                ? { mode: "rgb", band }
+                : { mode: "timeline", band, visits: DEFAULT_VISITS },
+            )
+          : await fetchFrames(id, {
+              mode: "epoch",
+              bins: 8,
+              // The compare surface is a two-epoch blink; the API can also
+              // request every epoch with `epochs=`.
+              epochs: `0,${Math.max(1, (detail?.epochs.length ?? 2) - 1)}`,
+            });
       const buffers = await Promise.all(
         response.planes.map((plane) => fetchPlane(plane.href)),
       );
@@ -427,16 +621,19 @@
         bandIndex = Math.max(0, response.planes[0]?.band_index ?? 0);
       }
       frameIndex =
-        stage === "timeline"
+        stage === "timeline" && !rgb
           ? Math.min(view.visit ?? 0, response.planes.length - 1)
           : 0;
       referenceIndex = 0;
       difference = false;
+      diffPlane = null;
+      diffMeta = null;
+    diffReference = null;
       appState = { kind: "ready", title: "Ready", message: "" };
       await tick();
       if (!setupRenderers()) return;
       uploadedKey = "";
-      playing = view.visit === undefined;
+      playing = !rgb && view.visit === undefined;
       initBlink();
       blink?.goTo(frameIndex);
       drawFrame(true);
@@ -487,6 +684,10 @@
       }
       stage = "timeline";
       difference = false;
+      rgb = false;
+      diffPlane = null;
+      diffMeta = null;
+    diffReference = null;
       bandValue = view.band ?? target.timeline?.default_band ?? 0;
       await loadFrames(id, bandValue);
     } catch (error) {
@@ -627,10 +828,49 @@
         {statusMessage}
         label={canvasLabel}
         pixelScaleArcsec={frames?.pixel_scale_arcsec ?? 0}
-        planePx={frames?.planes[0]?.width ?? 512}
+        planePx={frames?.source_plane_px ?? frames?.planes[0]?.width ?? 512}
         {difference}
         {notes}
         onResize={redrawForResize}
+      />
+
+      {#if difference && diffMeta?.cross_release}
+        <div
+          class="shrink-0 border-b border-warm/40 bg-warm/10 px-3 py-1.5 text-label text-warm"
+          role="status"
+          data-testid="cross-release-warning"
+        >
+          Cross-release difference — the visits come from different processing
+          releases, so a pipeline zero-point change may be present.
+        </div>
+      {/if}
+
+      {#if difference && (diffMeta?.bandpass_fraction ?? 0) > 0.25}
+        <div
+          class="shrink-0 border-b border-warn/40 bg-warn/10 px-3 py-1.5 text-label text-warn"
+          role="status"
+          data-testid="bandpass-warning"
+        >
+          Bandpass mismatch — the visits differ by
+          {diffMeta?.bandpass_delta_um?.toFixed(3)} µm
+          ({Math.round((diffMeta?.bandpass_fraction ?? 0) * 100)}% of the bin).
+          Bright-star residuals are expected; this is not a sky change.
+        </div>
+      {/if}
+
+      <DegradedBanner
+        degraded={frames
+          ? (frames.degraded_header || frames.degraded || false)
+          : false}
+        omitted={frames?.frames_omitted ?? []}
+        shown={frames?.visits ?? frames?.plane_count ?? steps.length}
+        available={frames?.available_visits ??
+          (frames?.mode === "epoch"
+            ? (frames?.bins ?? 0) * (frames?.epochs?.length ?? 0)
+            : steps.length)}
+        unit={frames?.mode === "epoch" ? "band" : "visit"}
+        resolutionReduced={frames?.resolution_reduced ?? false}
+        compressedBytes={frames?.compressed_bytes ?? null}
       />
 
       <Dock
@@ -638,7 +878,9 @@
         index={frameIndex}
         {playing}
         {difference}
+        {rgb}
         {canDifference}
+        {canRgb}
         {tone}
         {bands}
         band={stage === "timeline"
@@ -650,7 +892,7 @@
         {fps}
         minFps={MIN_FPS}
         maxFps={MAX_FPS}
-        degraded={frames?.degraded ?? false}
+        degraded={stage === "timeline" && (frames?.degraded ?? false)}
         omitted={frames?.frames_omitted ?? []}
         shown={frames?.visits ?? steps.length}
         available={frames?.available_visits ?? steps.length}
@@ -659,7 +901,8 @@
         onGoTo={goTo}
         onStep={step}
         onTogglePlay={togglePlayback}
-        onDifference={() => setDifference(!difference)}
+        onDifference={() => void setDifference(!difference)}
+        onRgb={() => void setRgb(!rgb)}
         onReference={setReference}
         onTone={setToneValue}
         onBand={(band) => void setBandValue(band)}
@@ -672,6 +915,8 @@
       {detail}
       {frames}
       stack={stackFacts}
+      reference={diffReference}
+      bandpass={diffBandpass}
       modes={modeRows}
       {view}
       citation={manifest?.citation ?? CITATION}
