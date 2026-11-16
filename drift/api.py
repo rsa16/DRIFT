@@ -6,10 +6,13 @@ Note: API is public, read-only, and unauthenticated.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import logging
+import math
 import os
 import re
 import shutil
+import sqlite3
 import tempfile
 import zlib
 from dataclasses import dataclass
@@ -24,6 +27,18 @@ from starlette.middleware.gzip import GZipMiddleware
 
 from drift.config import Settings
 from drift.cubes import DifferenceStack
+from drift.ingest.index import SpatialIndex
+from drift.ingest.targets import TARGETS as PINNED_TARGETS
+from drift.live import (
+    LIVE_BIN_SET,
+    SAFE_PLANE,
+    SAFE_TOKEN,
+    LiveBuilder,
+    LiveStore,
+    LiveTimeline,
+    RateLimiter,
+    resolve_key,
+)
 from drift.manifest import (
     Manifest,
     ManifestError,
@@ -1232,8 +1247,170 @@ def frames_payload(
     }
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def _resolve_number(
+    raw: str | None,
+    name: str,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    if raw is None or raw.strip() == "":
+        raise HTTPException(status_code=400, detail=f"{name} is required")
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{name} must be a number") from exc
+    if not math.isfinite(value):
+        raise HTTPException(status_code=400, detail=f"{name} must be finite")
+    if value < minimum or value > maximum:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{name} must be between {minimum:g} and {maximum:g}",
+        )
+    return value
+
+
+def _resolve_bins(raw: str | None) -> int:
+    if raw is None or raw.strip() == "":
+        return DEFAULT_BLINK_BINS
+    try:
+        value = int(raw, 10)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="bins must be an integer") from exc
+    if value not in LIVE_BIN_SET:
+        allowed = ", ".join(str(item) for item in sorted(LIVE_BIN_SET))
+        raise HTTPException(
+            status_code=400, detail=f"bins must be one of the fixed set: {allowed}"
+        )
+    return value
+
+
+def _pinned_resolve(target: Target, *, bins: int) -> dict[str, Any]:
+    band = _resolve_band(target, None)
+    rows, _, _ = _stack(target, band)
+    modes = dict(_target_modes(target))
+    timeline = dict(modes["timeline"])
+    timeline.update(
+        {
+            "visits": len(rows),
+            "default_band": band,
+            "estimated_frames": min(len(rows), bins, MAX_BLINK_BINS),
+        }
+    )
+    modes["timeline"] = timeline
+    return {
+        "live": False,
+        "pinned": True,
+        "cached": False,
+        "state": "ready" if timeline["enabled"] else "unavailable",
+        "degraded": False,
+        "unavailable": not timeline["enabled"],
+        "reason": "" if timeline["enabled"] else timeline["reason"],
+        "target_id": target.id,
+        "modes": modes,
+        "timeline": timeline,
+        "survey_compare": modes["survey_compare"],
+        "frames": None,
+    }
+
+
+def _live_resolve(
+    builder: LiveBuilder,
+    store: LiveStore,
+    limiter: RateLimiter,
+    *,
+    client_key: str,
+    ra: float,
+    dec: float,
+    fov: float,
+    bins: int,
+) -> dict[str, Any]:
+    key = resolve_key(ra, dec, fov, bins)
+    cached = store.get(key)
+    if cached is not None:
+        return _live_envelope(cached, ra=ra, dec=dec, fov=fov, bins=bins, cached=True)
+    if not limiter.allow(client_key):
+        retry_after = limiter.retry_after(client_key)
+        raise HTTPException(
+            status_code=429,
+            detail="live requests are limited to six per minute",
+            headers={"Retry-After": str(retry_after)},
+        )
+    timeline = builder.build(ra, dec, fov, bins)
+    if timeline.state == "ready":
+        store.put(key, timeline)
+    return _live_envelope(timeline, ra=ra, dec=dec, fov=fov, bins=bins, cached=False)
+
+
+def _live_envelope(
+    timeline: LiveTimeline,
+    *,
+    ra: float,
+    dec: float,
+    fov: float,
+    bins: int,
+    cached: bool,
+) -> dict[str, Any]:
+    return {
+        "live": True,
+        "pinned": False,
+        "cached": cached,
+        "state": timeline.state,
+        "degraded": timeline.degraded,
+        "unavailable": timeline.unavailable,
+        "reason": timeline.reason,
+        "ra": ra,
+        "dec": dec,
+        "fov": fov,
+        "bins": bins,
+        "target_id": "live",
+        "modes": timeline.modes,
+        "timeline": timeline.modes.get("timeline"),
+        "survey_compare": timeline.modes.get("survey_compare"),
+        "frames": timeline.frames,
+    }
+
+
+def _client_key(request: Request, trusted_proxy_hops: int) -> str:
+    peer = request.client.host if request.client else ""
+    if trusted_proxy_hops <= 0:
+        return peer or "unknown"
+    forwarded = request.headers.get("x-forwarded-for")
+    if not forwarded:
+        return peer or "unknown"
+    parts = [part.strip() for part in forwarded.split(",") if part.strip()]
+    if not parts:
+        return peer or "unknown"
+    index = max(0, len(parts) - trusted_proxy_hops)
+    try:
+        return str(ipaddress.ip_address(parts[index]))
+    except ValueError:
+        return peer or "unknown"
+
+
+def create_app(
+    settings: Settings | None = None,
+    *,
+    live_transport: Any | None = None,
+) -> FastAPI:
     resolved = settings or Settings.from_env()
+    spatial_index: SpatialIndex | None = None
+    if resolved.spatial_index is not None:
+        try:
+            spatial_index = SpatialIndex(resolved.spatial_index)
+        except (OSError, sqlite3.Error) as exc:
+            logger.warning(
+                "spatial index %s is unreadable; falling back to SIA: %s",
+                resolved.spatial_index,
+                exc,
+            )
+    live_builder = LiveBuilder(
+        resolved,
+        transport=live_transport,
+        index=spatial_index,
+    )
+    live_store = LiveStore(ttl_s=resolved.live_cache_ttl_s)
+    live_limiter = RateLimiter(resolved.live_rate_limit, resolved.live_rate_window_s)
     app = FastAPI(
         title="DRIFT",
         description="Differential Infrared Frame Tracker",
@@ -1260,7 +1437,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/manifest")
     def manifest() -> dict[str, Any]:
-        return _current_manifest(resolved).model_dump(mode="json")
+        body = _current_manifest(resolved).model_dump(mode="json")
+        body["live_enabled"] = resolved.live_enabled
+        body["live_max_fov_deg"] = resolved.live_max_fov_deg
+        return body
 
     @app.get("/api/v1/targets")
     def targets() -> dict[str, Any]:
@@ -1270,6 +1450,93 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "fixture": is_fixture_manifest(current),
             "targets": [_target_payload(current, target) for target in current.targets],
         }
+
+    @app.get("/api/v1/resolve")
+    def resolve(
+        request: Request,
+        response: Response,
+        ra: str | None = Query(None),
+        dec: str | None = Query(None),
+        fov: str | None = Query(None),
+        bins: str | None = Query(None),
+        target: str | None = Query(None),
+    ) -> dict[str, Any]:
+        requested_bins = _resolve_bins(bins)
+        ra_value = (
+            _resolve_number(ra, "ra", minimum=0.0, maximum=360.0)
+            if ra is not None and ra.strip() != ""
+            else None
+        )
+        dec_value = (
+            _resolve_number(dec, "dec", minimum=-90.0, maximum=90.0)
+            if dec is not None and dec.strip() != ""
+            else None
+        )
+        fov_value = (
+            _resolve_number(
+                fov,
+                "fov",
+                minimum=1e-6,
+                maximum=resolved.live_max_fov_deg,
+            )
+            if fov is not None and fov.strip() != ""
+            else None
+        )
+        target_id = target.strip() if target is not None else None
+        if target_id is not None:
+            if not target_id or target_id not in PINNED_TARGETS:
+                raise HTTPException(status_code=400, detail="unknown target")
+            current = _current_manifest(resolved)
+            pinned = next(
+                (item for item in current.targets if item.id == target_id), None
+            )
+            if pinned is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"target {target_id!r} is not in the pinned snapshot",
+                )
+            body = _pinned_resolve(pinned, bins=requested_bins)
+            response.headers["X-Spx-Live"] = "pinned"
+            return body
+
+        if ra_value is None or dec_value is None or fov_value is None:
+            missing = (
+                "ra" if ra_value is None else "dec" if dec_value is None else "fov"
+            )
+            raise HTTPException(status_code=400, detail=f"{missing} is required")
+
+        if not resolved.live_enabled:
+            raise HTTPException(status_code=404, detail="live path is not enabled")
+
+        client_key = _client_key(request, resolved.trusted_proxy_hops)
+        body = _live_resolve(
+            live_builder,
+            live_store,
+            live_limiter,
+            client_key=client_key,
+            ra=ra_value,
+            dec=dec_value,
+            fov=fov_value,
+            bins=requested_bins,
+        )
+        response.headers["X-Spx-Live"] = body["state"]
+        response.headers["X-Spx-Degraded"] = "1" if body["degraded"] else "0"
+        return body
+
+    @app.get("/api/v1/live/{token}/{filename}")
+    def live_plane(token: str, filename: str) -> Response:
+        plane_match = SAFE_PLANE.fullmatch(filename)
+        if not SAFE_TOKEN.fullmatch(token) or plane_match is None:
+            raise HTTPException(status_code=404, detail="plane not found")
+        index = int(plane_match.group(1))
+        planes = live_store.planes(token)
+        if planes is None or index >= len(planes):
+            raise HTTPException(status_code=404, detail="plane not found")
+        return Response(
+            content=planes[index],
+            media_type="application/octet-stream",
+            headers={"Cache-Control": "private, max-age=300"},
+        )
 
     @app.get("/api/v1/targets/{target_id}")
     def target_detail(target_id: str) -> dict[str, Any]:

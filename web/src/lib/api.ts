@@ -65,6 +65,8 @@ export interface ManifestSummary {
   generated_at: string | null;
   fixture: boolean;
   status: string | null;
+  live_enabled?: boolean;
+  live_max_fov_deg?: number;
   processing?: Record<string, unknown>;
   window?: WindowInfo | null;
   citation?: string | null;
@@ -180,6 +182,31 @@ export interface VisitMeta {
   obs_publisher_did: string | null;
 }
 
+export interface LiveTimelineMode extends TargetMode {
+  visits?: number;
+  default_band?: number | null;
+  estimated_frames?: number;
+}
+
+export interface ResolveResponse {
+  live: boolean;
+  pinned: boolean;
+  cached: boolean;
+  state: "ready" | "degraded" | "unavailable";
+  degraded: boolean;
+  unavailable: boolean;
+  reason: string;
+  ra?: number;
+  dec?: number;
+  fov?: number;
+  bins?: number;
+  target_id: string;
+  modes: Record<string, LiveTimelineMode>;
+  timeline: LiveTimelineMode | null;
+  survey_compare: TargetMode | null;
+  frames: FramesResponse | null;
+}
+
 export class ApiError extends Error {
   readonly status: number;
 
@@ -279,6 +306,21 @@ export async function fetchFrames(
 
 export function fetchHealth(): Promise<Health> {
   return fetchJson<Health>("/api/v1/health");
+}
+
+export function fetchResolve(
+  ra: number,
+  dec: number,
+  fov: number,
+  bins = 8,
+): Promise<ResolveResponse> {
+  const params = new URLSearchParams({
+    ra: String(ra),
+    dec: String(dec),
+    fov: String(fov),
+    bins: String(bins),
+  });
+  return fetchJson<ResolveResponse>(`/api/v1/resolve?${params.toString()}`);
 }
 
 export async function fetchPlane(href: string): Promise<ArrayBuffer> {

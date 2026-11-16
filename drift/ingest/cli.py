@@ -185,6 +185,50 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("DRIFT_SNAPSHOT_DIR", "/data/snapshots"),
         help="snapshot directory to publish into (default: DRIFT_SNAPSHOT_DIR)",
     )
+    index_parser = subparsers.add_parser(
+        "index", help="build or resume the S3 header index for live resolve"
+    )
+    index_parser.add_argument(
+        "--release",
+        required=True,
+        choices=("dr1", "qr3"),
+        help="processing release to index",
+    )
+    index_parser.add_argument(
+        "--prefix",
+        required=True,
+        help=("bounded level-2 S3 prefix, for example dr1/level2/2026W12_2A/"),
+    )
+    index_parser.add_argument(
+        "--index",
+        required=True,
+        dest="index_path",
+        help="SQLite index path to create or resume",
+    )
+    index_parser.add_argument(
+        "--page-size",
+        type=int,
+        default=1000,
+        help="S3 keys per listing page (default: 1000)",
+    )
+    index_parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        help="stop after this many listing pages (default: all)",
+    )
+    index_parser.add_argument(
+        "--max-files",
+        type=int,
+        default=None,
+        help="read at most this many new headers this run (default: all)",
+    )
+    index_parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=8,
+        help="concurrent header range-reads (default: 8)",
+    )
     build_parser = subparsers.add_parser(
         "build", help="build a published snapshot from the recorded fixture"
     )
@@ -225,6 +269,32 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "replay":
         return replay(args.fixture)
+    if args.command == "index":
+        from drift.ingest.index import build_index
+
+        report = build_index(
+            args.index_path,
+            release=args.release,
+            prefix=args.prefix,
+            page_size=args.page_size,
+            max_pages=args.max_pages,
+            max_files=args.max_files,
+            concurrency=args.concurrency,
+        )
+        print(
+            "index: "
+            f"discovered={report.discovered} "
+            f"read={report.read} "
+            f"indexed={report.indexed} "
+            f"skipped={report.skipped} "
+            f"failed={report.failed} "
+            f"deferred={report.deferred} "
+            f"pages={report.pages} "
+            f"truncated={str(report.truncated).lower()} "
+            f"elapsed={report.elapsed_s:.2f}s "
+            f"path={args.index_path}"
+        )
+        return 0
     if args.command == "build":
         from drift.ingest.real import build_real_snapshot
 

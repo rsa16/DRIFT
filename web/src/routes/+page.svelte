@@ -4,6 +4,7 @@
   import DegradedBanner from "$lib/components/DegradedBanner.svelte";
   import Dock from "$lib/components/Dock.svelte";
   import Header from "$lib/components/Header.svelte";
+  import LiveDialog from "$lib/components/LiveDialog.svelte";
   import Rail from "$lib/components/Rail.svelte";
   import Stage from "$lib/components/Stage.svelte";
   import {
@@ -12,12 +13,14 @@
     fetchHealth,
     fetchManifest,
     fetchPlane,
+    fetchResolve,
     fetchTarget,
     fetchTargets,
     type FramesResponse,
     type ManifestSummary,
     type PlaneMeta,
     type ReferenceVisit,
+    type ResolveResponse,
     type TargetDetail,
     type TargetSummary,
   } from "$lib/api";
@@ -110,6 +113,16 @@
   let view = $state<ViewState>({ ra: 0, dec: 0, fov: DEFAULT_FOV });
   let canvasA = $state<HTMLCanvasElement>();
   let railOpen = $state<boolean>(true);
+  let liveOpen = $state<boolean>(false);
+  let liveBusy = $state<boolean>(false);
+  let liveNotice = $state<string>("");
+  let loadGeneration = 0;
+  let liveQuery = $state<{
+    ra: number;
+    dec: number;
+    fov: number;
+    bins: number;
+  } | null>(null);
 
   let rendererA: PlaneRenderer | null = null;
   let blink: BlinkController | null = null;
@@ -157,6 +170,8 @@
     stage === "timeline" && !!frames && steps.length >= 3 && !difference,
   );
   const ready = $derived(appState.kind === "ready" && frames !== null);
+  const liveEnabled = $derived(manifest?.live_enabled === true);
+  const liveActive = $derived(selectedId === "live");
 
   const currentFacts = $derived(frameFacts(current?.meta));
   const referenceFacts = $derived(frameFacts(reference?.meta));
@@ -548,6 +563,7 @@
 
   async function setStage(next: StageMode): Promise<void> {
     if (!detail || next === stage) return;
+    if (detail.id === "live" && next === "compare") return;
     stage = next;
     difference = false;
     rgb = false;
@@ -582,7 +598,150 @@
     writeShareState(view);
   }
 
-  async function loadFrames(id: string, band: number | null): Promise<void> {
+  function liveDetail(
+    response: ResolveResponse,
+    ra: number,
+    dec: number,
+    fov: number,
+  ): TargetDetail {
+    const liveFrames = response.frames as FramesResponse;
+    const releases = new Set(
+      (liveFrames.visits_meta ?? []).map((visit) => visit.release),
+    );
+    const band = liveFrames.band ?? 0;
+    return {
+      id: "live",
+      name: `Live RA ${ra.toFixed(4)}° Dec ${dec.toFixed(4)}°`,
+      kind: "live archive position",
+      ra,
+      dec,
+      labels: ["live"],
+      fixture: false,
+      snapshot_id: liveFrames.snapshot_id,
+      epoch_count: releases.size,
+      visit_count: liveFrames.visits ?? liveFrames.planes.length,
+      frame_count: liveFrames.planes.length,
+      modes: {
+        ...response.modes,
+        survey_compare: {
+          enabled: false,
+          reason:
+            "Live positions serve a visit timeline; survey compare is available " +
+            "for pinned targets.",
+        },
+      },
+      timeline: {
+        default_band: band,
+        default_detector: liveFrames.detector ?? null,
+        visits: liveFrames.visits ?? 0,
+        span_days: liveFrames.span_days ?? 0,
+        bands: [band],
+      },
+      caveats: [
+        "Live archive path: these planes were fetched and reprojected for this " +
+          "position now; they are not part of the pinned snapshot.",
+        `Field of view ${fov.toFixed(3)}°.`,
+      ],
+      pixel_scale_arcsec: liveFrames.pixel_scale_arcsec,
+      units: liveFrames.units,
+      window: liveFrames.window,
+      epochs: [],
+    };
+  }
+
+  async function loadLive(
+    ra: number,
+    dec: number,
+    fov: number,
+    bins = DEFAULT_VISITS,
+  ): Promise<void> {
+    const generation = ++loadGeneration;
+    teardownRenderers();
+    frames = null;
+    decodedPlanes = [];
+    detail = null;
+    selectedId = "live";
+    liveQuery = { ra, dec, fov, bins };
+    liveBusy = true;
+    liveNotice = "";
+    appState = {
+      kind: "loading",
+      title: "Resolving live position",
+      message:
+        `Searching the live archive near RA ${ra.toFixed(4)}°, ` +
+        `Dec ${dec.toFixed(4)}°…`,
+    };
+    try {
+      const response = await fetchResolve(ra, dec, fov, bins);
+      if (generation !== loadGeneration) return;
+      if (response.pinned) {
+        liveBusy = false;
+        liveOpen = false;
+        await loadTarget(response.target_id, fov);
+        return;
+      }
+      if (response.state !== "ready" || !response.frames) {
+        liveBusy = false;
+        liveOpen = false;
+        liveNotice = response.reason;
+        appState = {
+          kind: response.degraded ? "degraded" : "unavailable",
+          title: response.degraded
+            ? "Live timeline degraded"
+            : "Live position unavailable",
+          message:
+            response.reason ||
+            "The live archive could not produce a timeline for this position.",
+          retryable: true,
+        };
+        return;
+      }
+      const buffers = await Promise.all(
+        response.frames.planes.map((plane) => fetchPlane(plane.href)),
+      );
+      if (generation !== loadGeneration) return;
+      const planes = buffers.map((buffer) => decodeSpx1(buffer));
+      const liveFrames = response.frames as FramesResponse;
+      frames = liveFrames;
+      decodedPlanes = planes;
+      detail = liveDetail(response, ra, dec, fov);
+      stage = "timeline";
+      bandValue = liveFrames.band ?? 0;
+      bandIndex = 0;
+      frameIndex = 0;
+      referenceIndex = 0;
+      difference = false;
+      view = { ra, dec, fov };
+      writeShareState(view);
+      appState = { kind: "ready", title: "Ready", message: "" };
+      liveBusy = false;
+      liveOpen = false;
+      await tick();
+      if (generation !== loadGeneration) return;
+      if (!setupRenderers()) return;
+      uploadedKey = "";
+      playing = true;
+      initBlink();
+      blink?.goTo(0);
+      drawFrame(true);
+      shareView();
+    } catch (error) {
+      if (generation !== loadGeneration) return;
+      liveBusy = false;
+      liveNotice = error instanceof Error ? error.message : String(error);
+      teardownRenderers();
+      frames = null;
+      decodedPlanes = [];
+      appState = errorState(error);
+    }
+  }
+
+  async function loadFrames(
+    id: string,
+    band: number | null,
+    generation?: number,
+  ): Promise<void> {
+    const token = generation ?? ++loadGeneration;
     teardownRenderers();
     frames = null;
     decodedPlanes = [];
@@ -607,9 +766,11 @@
               // request every epoch with `epochs=`.
               epochs: `0,${Math.max(1, (detail?.epochs.length ?? 2) - 1)}`,
             });
+      if (token !== loadGeneration) return;
       const buffers = await Promise.all(
         response.planes.map((plane) => fetchPlane(plane.href)),
       );
+      if (token !== loadGeneration) return;
       const planes = buffers.map((buffer) => decodeSpx1(buffer));
       frames = response;
       decodedPlanes = planes;
@@ -631,6 +792,7 @@
     diffReference = null;
       appState = { kind: "ready", title: "Ready", message: "" };
       await tick();
+      if (token !== loadGeneration) return;
       if (!setupRenderers()) return;
       uploadedKey = "";
       playing = !rgb && view.visit === undefined;
@@ -639,6 +801,7 @@
       drawFrame(true);
       shareView();
     } catch (error) {
+      if (token !== loadGeneration) return;
       teardownRenderers();
       frames = null;
       decodedPlanes = [];
@@ -647,6 +810,7 @@
   }
 
   async function loadTarget(id: string, fov = view.fov): Promise<void> {
+    const generation = ++loadGeneration;
     teardownRenderers();
     frames = null;
     decodedPlanes = [];
@@ -657,8 +821,11 @@
     };
     try {
       const target = await fetchTarget(id);
+      if (generation !== loadGeneration) return;
       detail = target;
       selectedId = id;
+      liveQuery = null;
+      liveNotice = "";
 
       const sharedBand = view.band;
       const sharedVisit = view.visit;
@@ -689,8 +856,9 @@
       diffMeta = null;
     diffReference = null;
       bandValue = view.band ?? target.timeline?.default_band ?? 0;
-      await loadFrames(id, bandValue);
+      await loadFrames(id, bandValue, generation);
     } catch (error) {
+      if (generation !== loadGeneration) return;
       teardownRenderers();
       frames = null;
       decodedPlanes = [];
@@ -731,6 +899,10 @@
               Math.max(shared.fov / 2, 0.25),
         );
         if (!match) {
+          if (liveEnabled) {
+            await loadLive(shared.ra, shared.dec, shared.fov, DEFAULT_VISITS);
+            return;
+          }
           selectedId = "";
           detail = null;
           appState = {
@@ -769,6 +941,11 @@
   }
 
   function onTargetChange(id: string): void {
+    if (id === "live") {
+      liveNotice = "";
+      liveOpen = true;
+      return;
+    }
     const target = targets.find((item) => item.id === id);
     if (!target) return;
 
@@ -777,7 +954,14 @@
   }
 
   function retry(): void {
-    if (selectedId) {
+    if (liveQuery) {
+      void loadLive(
+        liveQuery.ra,
+        liveQuery.dec,
+        liveQuery.fov,
+        liveQuery.bins,
+      );
+    } else if (selectedId) {
       void loadTarget(selectedId, view.fov);
     } else {
       void loadInitial();
@@ -809,8 +993,14 @@
     {targets}
     {selectedId}
     {railOpen}
+    {liveEnabled}
+    {liveActive}
     onTarget={onTargetChange}
     onToggleRail={() => (railOpen = !railOpen)}
+    onLive={() => {
+      liveNotice = "";
+      liveOpen = true;
+    }}
   />
 
   <main id="main" class="flex min-h-0 flex-1">
@@ -934,4 +1124,18 @@
       onStage={(next) => void setStage(next)}
     />
   </main>
+
+  {#if liveEnabled}
+    <LiveDialog
+      open={liveOpen}
+      ra={view.ra}
+      dec={view.dec}
+      fov={view.fov}
+      maxFov={manifest?.live_max_fov_deg ?? 1}
+      busy={liveBusy}
+      notice={liveNotice}
+      onClose={() => (liveOpen = false)}
+      onSubmit={(ra, dec, fov, bins) => void loadLive(ra, dec, fov, bins)}
+    />
+  {/if}
 </div>

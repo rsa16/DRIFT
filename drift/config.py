@@ -41,11 +41,26 @@ class Settings(BaseSettings):
     live_enabled: bool = False
     allow_fixture: bool = False
     irsa_base: str = DEFAULT_IRSA_BASE
+    trusted_proxy_hops: int = 0
+    live_timeout_s: float = 28.0
+    live_rate_limit: int = 6
+    live_rate_window_s: float = 60.0
+    live_max_concurrency: int = 2
+    live_max_fov_deg: float = 1.0
+    live_cache_ttl_s: float = 60.0
+    spatial_index: Path | None = None
     tls_cert: Path | None = None
     tls_key: Path | None = None
     domain: str | None = None
 
-    @field_validator("snapshot_dir", "cache_dir", "tls_cert", "tls_key", mode="before")
+    @field_validator(
+        "snapshot_dir",
+        "cache_dir",
+        "spatial_index",
+        "tls_cert",
+        "tls_key",
+        mode="before",
+    )
     @classmethod
     def _expand_path(cls, value: object) -> object:
         if value is None or value == "":
@@ -74,9 +89,13 @@ class Settings(BaseSettings):
             return cls()
 
         prefix = cls.model_config.get("env_prefix", "")
-        values = {
-            field: raw
-            for field in cls.model_fields
-            if (raw := environ.get(f"{prefix}{field}".upper())) not in (None, "")
-        }
+        values: dict[str, object] = {}
+        for name, field in cls.model_fields.items():
+            raw = environ.get(f"{prefix}{name}".upper())
+            if raw not in (None, ""):
+                values[name] = raw
+            else:
+                # Fill every unmentioned field with its declared default so
+                # model_validate cannot pull a value from os.environ or .env.
+                values[name] = field.get_default(call_default_factory=True)
         return cls.model_validate(values)

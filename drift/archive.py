@@ -11,19 +11,28 @@ import hashlib
 import io
 import json
 import logging
+import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 from urllib.error import HTTPError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+from urllib.request import (
+    HTTPRedirectHandler,
+    Request,
+    build_opener,
+    urlopen,
+)
 
 from drift.logging import log_external_request
 
 SIA2_BASE = "https://irsa.ipac.caltech.edu/SIA"
 TAP_BASE = "https://irsa.ipac.caltech.edu/TAP/sync"
+SPHEREX_CUTOUT_BASE = "https://irsa.ipac.caltech.edu/ibe/data/spherex/"
+_SPHEREX_KEY_PART = re.compile(r"^[A-Za-z0-9_.+-]+$")
+_SPHEREX_RELEASES = frozenset({"dr1", "qr3"})
 COLLECTION_QUERY = (
     "SELECT obs_collection AS collection, MAX(obs_release_date) AS release_date "
     "FROM spherex.obscore GROUP BY obs_collection ORDER BY obs_collection"
@@ -72,6 +81,14 @@ class Transport(Protocol):
     def get(self, url: str, timeout: float) -> HttpResponse: ...
 
 
+class RangeTransport(Transport, Protocol):
+    """A transport that can read a byte range from a fixed object."""
+
+    def get_range(
+        self, url: str, *, start: int, end: int, timeout: float
+    ) -> HttpResponse: ...
+
+
 @dataclass(frozen=True)
 class HttpResponse:
     url: str
@@ -83,10 +100,35 @@ class HttpResponse:
 class UrllibTransport:
     """Standard-library HTTP transport."""
 
+    def __init__(self, opener: Any | None = None) -> None:
+        self.opener = opener
+
     def get(self, url: str, timeout: float) -> HttpResponse:
-        request = Request(url, headers={"User-Agent": USER_AGENT})
+        return self._request(url, timeout=timeout, headers=None)
+
+    def get_range(
+        self, url: str, *, start: int, end: int, timeout: float
+    ) -> HttpResponse:
+        return self._request(
+            url,
+            timeout=timeout,
+            headers={"Range": f"bytes={start}-{end}"},
+        )
+
+    def _request(
+        self,
+        url: str,
+        *,
+        timeout: float,
+        headers: Mapping[str, str] | None,
+    ) -> HttpResponse:
+        request = Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
         try:
-            with urlopen(request, timeout=timeout) as response:
+            if self.opener is not None:
+                response_context = self.opener.open(request, timeout=timeout)
+            else:
+                response_context = urlopen(request, timeout=timeout)
+            with response_context as response:
                 return HttpResponse(
                     url=response.geturl(),
                     status=int(response.status),
@@ -101,6 +143,28 @@ class UrllibTransport:
                 body=body,
                 headers=dict(exc.headers.items()) if exc.headers else None,
             )
+
+
+class _StopRedirects(HTTPRedirectHandler):
+    """Refuse every redirect, so an archive response cannot become an SSRF hop."""
+
+    def redirect_request(
+        self,
+        req: Request,
+        fp: object,
+        code: int,
+        msg: str,
+        headers: object,
+        newurl: str,
+    ) -> None:
+        return None
+
+
+class NoRedirectTransport(UrllibTransport):
+    """A transport that fails a redirect instead of fetching its destination."""
+
+    def __init__(self) -> None:
+        super().__init__(build_opener(_StopRedirects()))
 
 
 @dataclass(frozen=True)
@@ -412,6 +476,24 @@ class CollectionDiscovery:
         if self.cache is not None:
             self.cache.put(self.cache.key(url), body, url=url)
         return parse_collections_csv(body)
+
+
+def spherex_cutout_url(key: str) -> str:
+    """Build a cutout URL for a validated level-2 object key.
+
+    The host and base path are fixed; only the index supplies ``key``.
+    """
+    parts = key.split("/")
+    if (
+        len(parts) < 4
+        or parts[0] not in _SPHEREX_RELEASES
+        or parts[1] != "level2"
+        or not key.endswith(".fits")
+        or not all(_SPHEREX_KEY_PART.fullmatch(part) for part in parts)
+        or any(part in {".", ".."} for part in parts)
+    ):
+        raise ArchiveError(f"refusing an unsafe SPHEREx object key: {key!r}")
+    return f"{SPHEREX_CUTOUT_BASE}{key}"
 
 
 def append_query(url: str, params: Mapping[str, str]) -> str:

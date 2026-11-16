@@ -8,8 +8,11 @@
     targets: TargetSummary[];
     selectedId: string;
     railOpen: boolean;
+    liveEnabled: boolean;
+    liveActive: boolean;
     onTarget: (id: string) => void;
     onToggleRail: () => void;
+    onLive: () => void;
   }
 
   let {
@@ -18,8 +21,11 @@
     targets,
     selectedId,
     railOpen,
+    liveEnabled,
+    liveActive,
     onTarget,
     onToggleRail,
+    onLive,
   }: Props = $props();
 
   const button =
@@ -32,7 +38,13 @@
   const selected = $derived(
     targets.find((target) => target.id === selectedId) ?? null,
   );
-  const selectedLabel = $derived(selected ? targetLabel(selected) : "");
+  const selectedLabel = $derived(
+    liveActive
+      ? "Live sky position"
+      : selected
+        ? targetLabel(selected)
+        : "",
+  );
 
   function formatAge(seconds: number | null): string {
     if (seconds === null || seconds === undefined) return "unknown age";
@@ -80,6 +92,9 @@
       title={selectedLabel ? `${selectedLabel} — ${selectedId}` : "Select a target"}
       onchange={(event) => onTarget(event.currentTarget.value)}
     >
+      {#if liveActive}
+        <option value="live">Live sky position</option>
+      {/if}
       {#each targets as target (target.id)}
         <option value={target.id} title={targetLabel(target)}>
           {targetLabel(target)}
@@ -119,6 +134,25 @@
   </div>
 
   <div class="ml-auto flex shrink-0 items-center gap-2">
+    {#if liveEnabled}
+      <button
+        type="button"
+        class={button}
+        aria-haspopup="dialog"
+        title="Fetch a timeline for any sky position from the live archive."
+        onclick={onLive}
+      >
+        <svg
+          viewBox="0 0 12 12"
+          class="h-3 w-3 fill-none stroke-signal [stroke-width:1.4]"
+          aria-hidden="true"
+        >
+          <circle cx="6" cy="6" r="1.6" class="fill-signal stroke-none" />
+          <path d="M6 0.8v2M6 9.2v2M0.8 6h2M9.2 6h2" />
+        </svg>
+        Live
+      </button>
+    {/if}
     <button
       type="button"
       class={button}
