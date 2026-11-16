@@ -1,7 +1,9 @@
 UV ?= uv
 PY := $(UV) run --frozen
+DEMO_FIXTURE := build/demo-fixture
+DEMO_SNAPSHOTS := build/demo-snapshots
 
-.PHONY: setup check fix audit secret-scan
+.PHONY: setup check fix audit secret-scan demo-fixture demo-snapshot
 
 setup:
 	$(UV) sync --frozen --all-extras
@@ -24,6 +26,14 @@ check:
 fix:
 	$(PY) ruff format drift tests
 	$(PY) ruff check --fix drift tests
+
+demo-fixture:
+	$(PY) python -m drift.ingest record --fixture $(DEMO_FIXTURE) \
+		--cutout-size-deg 0.9
+
+demo-snapshot:
+	$(PY) python -m drift.ingest build --fixture $(DEMO_FIXTURE) \
+		--snapshot-dir $(DEMO_SNAPSHOTS)
 
 audit:
 	@$(UV) export --frozen --no-emit-project --all-extras --format requirements-txt > .venv/audit-requirements.txt

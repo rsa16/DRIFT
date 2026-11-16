@@ -52,6 +52,83 @@ def response(status: int = 200, body: bytes = CSV_BODY.encode()) -> HttpResponse
     return HttpResponse(url="", status=status, body=body)
 
 
+def _fake_archive(root: Path, *, with_searches: bool = True) -> FakeTransport:
+    """Serve a minimal complete recording plan without touching the network."""
+    cube_path = root / "cube" / "lpv_cube_slice.fits"
+    cube_path.parent.mkdir(parents=True, exist_ok=True)
+    cube_path.write_bytes(
+        _fits_hdu(
+            _fits_card("SIMPLE", "T"),
+            _fits_card("BITPIX", "8"),
+            _fits_card("NAXIS", "0"),
+        )
+        + _fits_hdu(
+            _fits_card("XTENSION", "'IMAGE   '"),
+            _fits_card("BITPIX", "8"),
+            _fits_card("NAXIS", "1"),
+            _fits_card("NAXIS1", "4"),
+            _fits_card("EXTNAME", "'IMAGE   '"),
+            data=b"abcd",
+        )
+        + _fits_hdu(
+            _fits_card("XTENSION", "'IMAGE   '"),
+            _fits_card("BITPIX", "8"),
+            _fits_card("NAXIS", "1"),
+            _fits_card("NAXIS1", "4"),
+            _fits_card("EXTNAME", "'SPECTRAL_CHANNELS'"),
+            data=b"wxyz",
+        )
+    )
+    cutout = _fits_hdu(
+        _fits_card("SIMPLE", "T"),
+        _fits_card("BITPIX", "8"),
+        _fits_card("NAXIS", "0"),
+    ) + _fits_hdu(
+        _fits_card("XTENSION", "'IMAGE   '"),
+        _fits_card("BITPIX", "8"),
+        _fits_card("NAXIS", "1"),
+        _fits_card("NAXIS1", "4"),
+        _fits_card("EXTNAME", "'IMAGE   '"),
+        data=b"abcd",
+    )
+
+    searches: list[bytes] = []
+    for spec in targets.FIXTURE_SEARCHES:
+        rows = [
+            (cutout.filename, cutout.target_mjd, cutout.band)
+            for cutout in targets.FIXTURE_CUTOUTS
+            if cutout.target == spec.target and cutout.collection == spec.collection
+        ]
+        if not rows:
+            band = "D1" if spec.target == "bamberga" else "D3"
+            rows = [(f"{spec.target}_{spec.collection}", 61000.0, band)]
+        body = (
+            "obs_publisher_did,access_url,t_min,obs_release_date,"
+            "obs_collection,energy_bandpassname\n"
+            + "".join(
+                f"ivo://example/{spec.target}/{filename},"
+                f"https://example.test/{filename}.fits,"
+                f"{mjd},2026-01-01,{spec.collection},SPHEREx-{band}\n"
+                for filename, mjd, band in rows
+            )
+        )
+        searches.append(body.encode())
+    discovery_body = (
+        "collection,release_date\n"
+        + "".join(
+            f"{name},{release}\n"
+            for name, release in targets.SEED_COLLECTIONS
+            if name.startswith("spherex_")
+        )
+    ).encode()
+    search_responses = [response(body=body) for body in searches]
+    return FakeTransport(
+        (search_responses if with_searches else [])
+        + [response(body=cutout) for _ in targets.FIXTURE_CUTOUTS]
+        + [response(body=discovery_body)]
+    )
+
+
 def test_search_sends_collection_and_never_falls_back() -> None:
     transport = FakeTransport([response()])
     client = Sia2Client(transport=transport)
@@ -397,78 +474,7 @@ def test_cli_configures_info_logging(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_record_builds_a_fixture_from_a_fake_archive(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    cube_path = tmp_path / "cube" / "lpv_cube_slice.fits"
-    cube_path.parent.mkdir(parents=True)
-    cube_path.write_bytes(
-        _fits_hdu(
-            _fits_card("SIMPLE", "T"),
-            _fits_card("BITPIX", "8"),
-            _fits_card("NAXIS", "0"),
-        )
-        + _fits_hdu(
-            _fits_card("XTENSION", "'IMAGE   '"),
-            _fits_card("BITPIX", "8"),
-            _fits_card("NAXIS", "1"),
-            _fits_card("NAXIS1", "4"),
-            _fits_card("EXTNAME", "'IMAGE   '"),
-            data=b"abcd",
-        )
-        + _fits_hdu(
-            _fits_card("XTENSION", "'IMAGE   '"),
-            _fits_card("BITPIX", "8"),
-            _fits_card("NAXIS", "1"),
-            _fits_card("NAXIS1", "4"),
-            _fits_card("EXTNAME", "'SPECTRAL_CHANNELS'"),
-            data=b"wxyz",
-        )
-    )
-    cutout = _fits_hdu(
-        _fits_card("SIMPLE", "T"),
-        _fits_card("BITPIX", "8"),
-        _fits_card("NAXIS", "0"),
-    ) + _fits_hdu(
-        _fits_card("XTENSION", "'IMAGE   '"),
-        _fits_card("BITPIX", "8"),
-        _fits_card("NAXIS", "1"),
-        _fits_card("NAXIS1", "4"),
-        _fits_card("EXTNAME", "'IMAGE   '"),
-        data=b"abcd",
-    )
-
-    searches: list[bytes] = []
-    for spec in targets.FIXTURE_SEARCHES:
-        rows = [
-            (cutout.filename, cutout.target_mjd, cutout.band)
-            for cutout in targets.FIXTURE_CUTOUTS
-            if cutout.target == spec.target and cutout.collection == spec.collection
-        ]
-        if not rows:
-            band = "D1" if spec.target == "bamberga" else "D3"
-            rows = [(f"{spec.target}_{spec.collection}", 61000.0, band)]
-        body = (
-            "obs_publisher_did,access_url,t_min,obs_release_date,"
-            "obs_collection,energy_bandpassname\n"
-            + "".join(
-                f"ivo://example/{spec.target}/{filename},"
-                f"https://example.test/{filename}.fits,"
-                f"{mjd},2026-01-01,{spec.collection},SPHEREx-{band}\n"
-                for filename, mjd, band in rows
-            )
-        )
-        searches.append(body.encode())
-    discovery_body = (
-        "collection,release_date\n"
-        + "".join(
-            f"{name},{release}\n"
-            for name, release in targets.SEED_COLLECTIONS
-            if name.startswith("spherex_")
-        )
-    ).encode()
-    transport = FakeTransport(
-        [response(body=body) for body in searches]
-        + [response(body=cutout) for _ in targets.FIXTURE_CUTOUTS]
-        + [response(body=discovery_body)]
-    )
+    transport = _fake_archive(tmp_path)
 
     assert ingest_record.record(tmp_path, transport=transport) == 0
     assert ingest_record.fixture_complete(tmp_path) is True
@@ -481,6 +487,177 @@ def test_record_builds_a_fixture_from_a_fake_archive(
     assert ingest_record.record(tmp_path, transport=transport) == 0
     assert "no network calls" in capsys.readouterr().out
     assert len(transport.calls) == calls
+
+
+def test_record_cutout_size_override_reaches_fetch_and_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ingest_record.time, "sleep", lambda _: None)
+    transport = _fake_archive(tmp_path)
+
+    assert ingest_record.record(tmp_path, transport=transport, cutout_size_deg=0.9) == 0
+
+    index = json.loads((tmp_path / "index.json").read_text(encoding="utf-8"))
+    assert {entry["size_deg"] for entry in index["cutouts"]} == {0.9}
+    for entry in index["cutouts"]:
+        assert parse_qs(urlsplit(entry["url"]).query)["size"] == ["0.9"]
+
+    fetched = [url for url in transport.calls if "center=" in url]
+    assert len(fetched) == len(targets.FIXTURE_CUTOUTS)
+    for url in fetched:
+        assert parse_qs(urlsplit(url).query)["size"] == ["0.9"]
+
+    default_root = tmp_path / "default"
+    default_transport = _fake_archive(default_root)
+    assert ingest_record.record(default_root, transport=default_transport) == 0
+    default_index = json.loads(
+        (default_root / "index.json").read_text(encoding="utf-8")
+    )
+    expected = {spec.filename: spec.size_deg for spec in targets.FIXTURE_CUTOUTS}
+    for entry in default_index["cutouts"]:
+        filename = Path(entry["path"]).name
+        assert entry["size_deg"] == expected[filename]
+        assert parse_qs(urlsplit(entry["url"]).query)["size"] == [
+            str(expected[filename])
+        ]
+    assert ingest_record.fixture_complete(default_root) is True
+
+    # An override never reuses a cutout recorded at a different size, even
+    # when the caller forgot --force.
+    rerun_transport = _fake_archive(default_root, with_searches=False)
+    assert (
+        ingest_record.record(
+            default_root,
+            transport=rerun_transport,
+            cutout_size_deg=0.9,
+        )
+        == 0
+    )
+    refetched = [url for url in rerun_transport.calls if "center=" in url]
+    assert len(refetched) == len(targets.FIXTURE_CUTOUTS)
+    for url in refetched:
+        assert parse_qs(urlsplit(url).query)["size"] == ["0.9"]
+    rerun_index = json.loads((default_root / "index.json").read_text(encoding="utf-8"))
+    assert {entry["size_deg"] for entry in rerun_index["cutouts"]} == {0.9}
+
+
+def test_override_resumes_missing_cutouts_at_file_granularity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ingest_record.time, "sleep", lambda _: None)
+    first = _fake_archive(tmp_path)
+    assert ingest_record.record(tmp_path, transport=first, cutout_size_deg=0.9) == 0
+
+    index = json.loads((tmp_path / "index.json").read_text(encoding="utf-8"))
+    missing_path = tmp_path / index["cutouts"][0]["path"]
+    missing_path.unlink()
+
+    full = _fake_archive(tmp_path, with_searches=False)
+    partial = FakeTransport([full.responses[0], full.responses[-1]])
+    assert ingest_record.record(tmp_path, transport=partial, cutout_size_deg=0.9) == 0
+
+    fetched = [url for url in partial.calls if "center=" in url]
+    assert len(fetched) == 1
+    assert parse_qs(urlsplit(fetched[0]).query)["size"] == ["0.9"]
+    resumed = json.loads((tmp_path / "index.json").read_text(encoding="utf-8"))
+    assert {entry["size_deg"] for entry in resumed["cutouts"]} == {0.9}
+    assert (tmp_path / ".cutout-progress.json").is_file()
+
+    # A changed recorded visit invalidates that cutout's progress entry.
+    progress_path = tmp_path / ".cutout-progress.json"
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    stale = f"cutouts/{Path(resumed['cutouts'][1]['path']).name}"
+    progress[stale]["url"] = "https://example.test/stale.fits"
+    progress_path.write_text(json.dumps(progress), encoding="utf-8")
+    revisit = _fake_archive(tmp_path, with_searches=False)
+    revisit_transport = FakeTransport([revisit.responses[0], revisit.responses[-1]])
+    assert (
+        ingest_record.record(tmp_path, transport=revisit_transport, cutout_size_deg=0.9)
+        == 0
+    )
+    refetched_visits = [url for url in revisit_transport.calls if "center=" in url]
+    assert len(refetched_visits) == 1
+
+    # A different requested size invalidates every progress entry.
+    changed = _fake_archive(tmp_path, with_searches=False)
+    assert ingest_record.record(tmp_path, transport=changed, cutout_size_deg=0.5) == 0
+    refetched = [url for url in changed.calls if "center=" in url]
+    assert len(refetched) == len(targets.FIXTURE_CUTOUTS)
+    for url in refetched:
+        assert parse_qs(urlsplit(url).query)["size"] == ["0.5"]
+
+
+def test_cutout_uses_only_the_targets_own_search_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ingest_record.time, "sleep", lambda _: None)
+    _fake_archive(tmp_path)  # writes a reusable cube slice
+    searches = (
+        targets.SearchSpec("barnard", "spherex_dr1", "barnard.csv"),
+        targets.SearchSpec("bamberga", "spherex_dr1", "bamberga.csv"),
+    )
+    cutouts = (
+        targets.CutoutSpec(
+            "barnard",
+            "spherex_dr1",
+            "D3",
+            61100.0,
+            "barnard.fits",
+            center=(1.0, 2.0),
+        ),
+    )
+    monkeypatch.setattr(ingest_record, "FIXTURE_SEARCHES", searches)
+    monkeypatch.setattr(ingest_record, "FIXTURE_CUTOUTS", cutouts)
+
+    own = (
+        b"obs_publisher_did,access_url,t_min,obs_release_date,"
+        b"obs_collection,energy_bandpassname\n"
+        b"ivo://example/own,https://example.test/own.fits,61110,"
+        b"2026-01-01,spherex_dr1,SPHEREx-D3\n"
+    )
+    other = (
+        b"obs_publisher_did,access_url,t_min,obs_release_date,"
+        b"obs_collection,energy_bandpassname\n"
+        b"ivo://example/other,https://example.test/other.fits,61100,"
+        b"2026-01-01,spherex_dr1,SPHEREx-D3\n"
+    )
+    discovery = (
+        "collection,release_date\n"
+        + "".join(
+            f"{name},{release}\n"
+            for name, release in targets.SEED_COLLECTIONS
+            if name.startswith("spherex_")
+        )
+    ).encode()
+    cutout_body = _fits_hdu(
+        _fits_card("SIMPLE", "T"),
+        _fits_card("BITPIX", "8"),
+        _fits_card("NAXIS", "0"),
+    ) + _fits_hdu(
+        _fits_card("XTENSION", "'IMAGE   '"),
+        _fits_card("BITPIX", "8"),
+        _fits_card("NAXIS", "1"),
+        _fits_card("NAXIS1", "4"),
+        _fits_card("EXTNAME", "'IMAGE   '"),
+        data=b"abcd",
+    )
+    transport = FakeTransport(
+        [
+            response(body=own),
+            response(body=other),
+            response(body=cutout_body),
+            response(body=discovery),
+        ]
+    )
+
+    assert ingest_record.record(tmp_path, transport=transport) == 0
+
+    index = json.loads((tmp_path / "index.json").read_text(encoding="utf-8"))
+    assert index["cutouts"][0]["access_url"] == "https://example.test/own.fits"
+    fetched = [url for url in transport.calls if "center=" in url]
+    assert len(fetched) == 1
+    assert fetched[0].startswith("https://example.test/own.fits?")
+    assert parse_qs(urlsplit(fetched[0]).query)["center"] == ["1.0,2.0"]
 
 
 def test_fixture_rejects_unknown_schema_version(tmp_path: Path) -> None:

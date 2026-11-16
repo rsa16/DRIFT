@@ -392,14 +392,32 @@ def record(
     *,
     force: bool = False,
     transport: Transport | None = None,
+    cutout_size_deg: float | None = None,
 ) -> int:
-    """Record the archive fixture under ``fixture``, or do nothing if complete."""
+    """Record the archive fixture under ``fixture``, or do nothing if complete.
+
+    ``cutout_size_deg`` overrides the configured size in the fetch, the index
+    entry, and the recorded URL.
+    """
     root = Path(fixture)
-    if not force and fixture_complete(root):
+    if not force and cutout_size_deg is None and fixture_complete(root):
         print(f"record: fixture already complete at {root}; no network calls")
         return 0
 
     root.mkdir(parents=True, exist_ok=True)
+    progress_path = root / ".cutout-progress.json"
+    progress: dict[str, dict[str, Any]] = {}
+    if cutout_size_deg is not None and progress_path.is_file():
+        try:
+            payload = json.loads(progress_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                progress = {
+                    str(key): value
+                    for key, value in payload.items()
+                    if isinstance(value, dict)
+                }
+        except (OSError, json.JSONDecodeError):
+            progress = {}
     (root / "sia").mkdir(exist_ok=True)
     (root / "cutouts").mkdir(exist_ok=True)
     (root / "cube").mkdir(exist_ok=True)
@@ -420,7 +438,7 @@ def record(
         except (OSError, json.JSONDecodeError, KeyError, TypeError):
             previous = {}
 
-    rows_by_file: dict[str, list[dict[str, str]]] = {}
+    rows_by_target: dict[str, list[dict[str, str]]] = {}
     searches: list[dict[str, Any]] = []
     for spec in FIXTURE_SEARCHES:
         ra, dec = TARGETS[spec.target][:2]
@@ -440,7 +458,7 @@ def record(
                 write_rows(path, rows)
             else:
                 _atomic_write(path, body)
-        rows_by_file[spec.filename] = rows
+        rows_by_target.setdefault(spec.target, []).extend(rows)
         entry: dict[str, Any] = {
             "target": spec.target,
             "collection": spec.collection,
@@ -464,7 +482,6 @@ def record(
         )
 
     cutouts: list[dict[str, Any]] = []
-    all_rows = [row for rows in rows_by_file.values() for row in rows]
     for cutout_spec in FIXTURE_CUTOUTS:
         time.sleep(2.0)
         if cutout_spec.center is not None:
@@ -478,23 +495,58 @@ def record(
                 pm_dec,
                 cutout_spec.target_mjd,
             )
+        # Only rows returned by this target's own cone searches are eligible.
+        # Every such row overlaps the target, whereas a visit from another
+        # target's search may be nearer in time but miss the cutout entirely.
         row = select_row(
-            all_rows,
+            rows_by_target.get(cutout_spec.target, []),
             cutout_spec.collection,
             cutout_spec.band,
             cutout_spec.target_mjd,
         )
-        path = root / "cutouts" / cutout_spec.filename
-        if not force and path.is_file():
+        size_deg = (
+            cutout_size_deg if cutout_size_deg is not None else cutout_spec.size_deg
+        )
+        url = fetcher.cutout_url(row["access_url"], center=center, size_deg=size_deg)
+        relative = f"cutouts/{cutout_spec.filename}"
+        path = root / relative
+        reusable = not force and path.is_file()
+        if reusable and cutout_size_deg is not None:
+            recorded = progress.get(relative, {})
+            try:
+                recorded_size = float(recorded.get("size_deg", -1.0))
+            except (TypeError, ValueError):
+                recorded_size = -1.0
+            reusable = (
+                isclose(
+                    recorded_size,
+                    size_deg,
+                    rel_tol=0,
+                    abs_tol=1e-12,
+                )
+                and recorded.get("url") == url
+            )
+        if reusable:
             body = path.read_bytes()
         else:
             body = fetcher.fetch(
                 row["access_url"],
                 center=center,
-                size_deg=cutout_spec.size_deg,
+                size_deg=size_deg,
                 strip_epsf=True,
             )
             _atomic_write(path, body)
+        if cutout_size_deg is not None:
+            progress[relative] = {
+                "size_deg": size_deg,
+                "url": url,
+                "bytes": len(body),
+                "sha256": _sha256_file(path),
+            }
+            _atomic_write(
+                progress_path,
+                (json.dumps(progress, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+            )
         cutouts.append(
             {
                 "target": cutout_spec.target,
@@ -504,10 +556,8 @@ def record(
                 "obs_publisher_did": row["obs_publisher_did"],
                 "access_url": row["access_url"],
                 "center": [center[0], center[1]],
-                "size_deg": cutout_spec.size_deg,
-                "url": fetcher.cutout_url(
-                    row["access_url"], center=center, size_deg=cutout_spec.size_deg
-                ),
+                "size_deg": size_deg,
+                "url": url,
                 "path": f"cutouts/{cutout_spec.filename}",
                 "bytes": len(body),
                 "strip_epsf": True,

@@ -24,10 +24,12 @@ EPOCH_GAP_DAYS = 180.0
 
 
 def release_from_collection(collection: str) -> str:
-    """Map a SIA2 collection to its release."""
+    """Map a SIA2 collection to its release, ignoring the ``_deep`` survey mode."""
     release = collection.removeprefix("spherex_")
     if release == "qr2" or release.startswith("qr2_"):
         raise ValueError("QR2 never enters a comparison")
+    if release.endswith("_deep"):
+        release = release.removesuffix("_deep")
     return release
 
 
@@ -138,6 +140,12 @@ def main(argv: list[str] | None = None) -> int:
         help="directory to write the recorded fixture into",
     )
     record_parser.add_argument("--force", action="store_true")
+    record_parser.add_argument(
+        "--cutout-size-deg",
+        type=float,
+        default=None,
+        help="override every recorded cutout size in degrees",
+    )
     replay_parser = subparsers.add_parser(
         "replay", help="replay the fixture with no network"
     )
@@ -177,10 +185,37 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("DRIFT_SNAPSHOT_DIR", "/data/snapshots"),
         help="snapshot directory to publish into (default: DRIFT_SNAPSHOT_DIR)",
     )
+    build_parser = subparsers.add_parser(
+        "build", help="build a published snapshot from the recorded fixture"
+    )
+    build_parser.add_argument(
+        "--fixture",
+        required=True,
+        help="directory holding the recorded fixture",
+    )
+    build_parser.add_argument(
+        "--targets",
+        default="bamberga,lpv,barnard",
+        help="comma-separated target ids (default: bamberga,lpv,barnard)",
+    )
+    build_parser.add_argument(
+        "--snapshot-dir",
+        default=os.environ.get("DRIFT_SNAPSHOT_DIR", "/data/snapshots"),
+        help="snapshot directory to publish into (default: DRIFT_SNAPSHOT_DIR)",
+    )
+    build_parser.add_argument(
+        "--generated-at",
+        default=None,
+        help="fixed ISO timestamp for a reproducible snapshot id",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "record":
-        return record(args.fixture, force=args.force)
+        return record(
+            args.fixture,
+            force=args.force,
+            cutout_size_deg=args.cutout_size_deg,
+        )
     if args.command == "pair":
         return pair(
             args.fixture,
@@ -190,6 +225,20 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "replay":
         return replay(args.fixture)
+    if args.command == "build":
+        from drift.ingest.real import build_real_snapshot
+
+        targets = tuple(
+            item.strip() for item in args.targets.split(",") if item.strip()
+        )
+        pointer = build_real_snapshot(
+            args.snapshot_dir,
+            fixture=args.fixture,
+            targets=targets,
+            generated_at=args.generated_at,
+        )
+        print(f"build: published {pointer.snapshot_id} to {args.snapshot_dir}")
+        return 0
     if not args.synthetic:
         parser.error(
             "fixture requires --synthetic; production snapshots use the "
