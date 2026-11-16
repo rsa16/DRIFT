@@ -15,6 +15,7 @@ check:
 	@if [ -f web/package.json ]; then \
 		pnpm -C web install --frozen-lockfile && \
 		pnpm -C web check && \
+		pnpm -C web test && \
 		pnpm -C web build; \
 	else \
 		echo "check: web skipped (no web/package.json yet)"; \

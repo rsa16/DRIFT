@@ -1,8 +1,10 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
 
-  import MiniMap from "$lib/MiniMap.svelte";
-  import StateView from "$lib/StateView.svelte";
+  import Dock from "$lib/components/Dock.svelte";
+  import Header from "$lib/components/Header.svelte";
+  import Rail from "$lib/components/Rail.svelte";
+  import Stage from "$lib/components/Stage.svelte";
   import {
     ApiError,
     fetchFrames,
@@ -35,6 +37,15 @@
     type ViewState,
   } from "$lib/ShareState";
   import { decodeSpx1, Spx1Error, type DecodedPlane } from "$lib/spx1";
+  import {
+    bandTicks,
+    canvasAltText,
+    captionFacts,
+    frameFacts,
+    visitLabel,
+    type StackFacts,
+  } from "$lib/format";
+  import { buildHistogram } from "$lib/histogram";
 
   const CITATION =
     "This publication makes use of data products from the Spectro-Photometer " +
@@ -79,16 +90,17 @@
   });
   let stage = $state<StageMode>("timeline");
   let difference = $state<boolean>(false);
-  let preset = $state<RenderPreset>("linear");
+  let tone = $state<RenderPreset>("asinh");
   let fps = $state<number>(DEFAULT_FPS);
   let playing = $state<boolean>(true);
   let bandValue = $state<number>(0);
+  let bandIndex = $state<number>(0);
   let frameIndex = $state<number>(0);
   let referenceIndex = $state<number>(0);
-  let altText = $state<string>("No frame loaded.");
   let statusMessage = $state<string>("");
   let view = $state<ViewState>({ ra: 0, dec: 0, fov: DEFAULT_FOV });
   let canvasA = $state<HTMLCanvasElement>();
+  let railOpen = $state<boolean>(true);
 
   let rendererA: PlaneRenderer | null = null;
   let blink: BlinkController | null = null;
@@ -103,14 +115,6 @@
       : [],
   );
   const bands = $derived(detail?.timeline?.bands ?? []);
-  const backend = $derived(
-    stage === "timeline"
-      ? (detail?.modes.timeline ?? { enabled: false, reason: "No timeline." })
-      : (detail?.modes.survey_compare ?? {
-          enabled: false,
-          reason: "No survey compare.",
-        }),
-  );
   const modeRows = $derived(
     detail
       ? Object.entries(detail.modes).map(([key, value]) => ({
@@ -121,18 +125,63 @@
         }))
       : [],
   );
-  const badgeState = $derived(
-    manifest ? "ready" : appState.kind === "error" ? "error" : "loading",
-  );
   const compareGroup = $derived(
     stage === "compare" && frames
       ? frames.planes
           .map((meta, position) => ({ meta, plane: decodedPlanes[position] }))
-          .filter((entry) => entry.meta.band_index === bandValue)
+          .filter((entry) => entry.meta.band_index === bandIndex)
       : [],
   );
-  const strip = $derived(stage === "timeline" ? entries : compareGroup);
-  const stripIndex = $derived(stage === "timeline" ? frameIndex : frameIndex);
+  const steps = $derived(stage === "timeline" ? entries : compareGroup);
+  const compareBands = $derived(
+    stage === "compare" && frames ? bandTicks(frames.planes) : [],
+  );
+  const current = $derived<PlaneEntry | null>(steps[frameIndex] ?? null);
+  const reference = $derived<PlaneEntry | null>(
+    steps[referenceIndex] ?? steps[0] ?? null,
+  );
+  const stackMeta = $derived<PlaneMeta | undefined>(
+    stage === "timeline" ? frames?.planes[0] : compareGroup[0]?.meta,
+  );
+  const canDifference = $derived(
+    !!current && steps.length > 1 && frameIndex !== referenceIndex,
+  );
+  const ready = $derived(appState.kind === "ready" && frames !== null);
+
+  const currentFacts = $derived(frameFacts(current?.meta));
+  const referenceFacts = $derived(frameFacts(reference?.meta));
+  const stackFacts = $derived<StackFacts | null>(
+    frames && stackMeta
+      ? {
+          detector: stackMeta.detector ?? frames.detector ?? null,
+          lambdaLoUm: stackMeta.lambda_lo_um,
+          lambdaHiUm: stackMeta.lambda_hi_um,
+          pixelScaleArcsec: frames.pixel_scale_arcsec,
+          units: frames.units,
+          windowSha: frames.window.sha256,
+        }
+      : null,
+  );
+  const caption = $derived(currentFacts ? captionFacts(currentFacts) : []);
+  const notes = $derived([
+    ...(detail?.caveats ?? []),
+    ...(frames?.refused_frames ?? []).map((id) => `Refused frame ${id}.`),
+  ]);
+  const altText = $derived.by(() => {
+    if (!currentFacts || !stackFacts) return "No frame loaded.";
+    if (difference && referenceFacts) {
+      return (
+        `Difference image: visit ${visitLabel(currentFacts)} against reference ` +
+        `${visitLabel(referenceFacts)}. ${canvasAltText(currentFacts, stackFacts)} ` +
+        "Blue means brighter in the current visit, amber fainter, magenta missing pixels."
+      );
+    }
+    return canvasAltText(currentFacts, stackFacts);
+  });
+  const canvasLabel = $derived(difference ? "Difference image" : "Sky image");
+  const histogram = $derived(
+    buildHistogram(current?.plane ?? null, frames?.window ?? null),
+  );
 
   function separationDeg(ra1: number, dec1: number, ra2: number, dec2: number): number {
     const radians = Math.PI / 180;
@@ -142,93 +191,6 @@
         Math.cos(dec2 * radians) *
         Math.cos((ra1 - ra2) * radians);
     return Math.acos(Math.min(1, Math.max(-1, cosine))) / radians;
-  }
-
-  function formatAge(seconds: number | null): string {
-    if (seconds === null || seconds === undefined) return "unknown age";
-    if (seconds < 120) return `${Math.round(seconds)} s old`;
-    if (seconds < 7200) return `${Math.round(seconds / 60)} min old`;
-    if (seconds < 172800) return `${Math.round(seconds / 3600)} h old`;
-    return `${Math.round(seconds / 86400)} d old`;
-  }
-
-  function formatRun(value: string | null | undefined): string {
-    if (!value) return "unknown";
-    const parsed = new Date(value);
-    if (Number.isNaN(parsed.valueOf())) return value;
-    return `${parsed.toISOString().slice(0, 16).replace("T", " ")} UTC`;
-  }
-
-  function formatDate(value: string | null | undefined): string {
-    if (!value) return "date unknown";
-    const parsed = new Date(value);
-    if (Number.isNaN(parsed.valueOf())) return value;
-    return `${parsed.toISOString().slice(0, 16).replace("T", " ")}Z`;
-  }
-
-  function shortDate(value: string | null | undefined): string {
-    if (!value) return "—";
-    const parsed = new Date(value);
-    if (Number.isNaN(parsed.valueOf())) return value;
-    return parsed.toISOString().slice(0, 10);
-  }
-
-  function formatMjd(value: number | null | undefined): string {
-    return value === null || value === undefined ? "MJD —" : `MJD ${value.toFixed(3)}`;
-  }
-
-  function formatLambda(meta: PlaneMeta | undefined): string {
-    if (!meta) return "—";
-    return `${meta.lambda_lo_um.toFixed(2)}–${meta.lambda_hi_um.toFixed(2)} µm`;
-  }
-
-  function scaleText(): string {
-    return detail ? `${detail.pixel_scale_arcsec.toFixed(3)}″/px` : "—";
-  }
-
-  function unitsText(): string {
-    return detail?.units ?? frames?.units ?? "—";
-  }
-
-  function targetLabel(target: TargetSummary): string {
-    return target.name ?? target.id;
-  }
-
-  function releaseText(meta: PlaneMeta | undefined): string {
-    if (!meta) return "—";
-    return meta.release.toUpperCase();
-  }
-
-  function visitLabel(meta: PlaneMeta | undefined): string {
-    if (!meta) return "—";
-    if (meta.visit_id) return meta.visit_id;
-    return meta.epoch_id ?? "—";
-  }
-
-  function currentEntry(): PlaneEntry | undefined {
-    if (stage === "timeline") return entries[frameIndex];
-    return compareGroup[frameIndex];
-  }
-
-  function referenceEntry(): PlaneEntry | undefined {
-    if (stage === "timeline") return entries[referenceIndex] ?? entries[0];
-    return compareGroup[0];
-  }
-
-  function panelLabel(): string {
-    const meta = currentEntry()?.meta;
-    if (!meta) return "No image loaded";
-    if (difference) {
-      return (
-        `Difference image: ${visitLabel(meta)} minus ${visitLabel(referenceEntry()?.meta)}, ` +
-        `${formatLambda(meta)}, ${scaleText()}, ${unitsText()}`
-      );
-    }
-    return (
-      `Visit ${visitLabel(meta)} on ${formatDate(meta.date)}, ` +
-      `${releaseText(meta)} ${meta.detector ?? ""}, ${formatLambda(meta)}, ` +
-      `${scaleText()}, ${unitsText()}`
-    );
   }
 
   function errorState(error: unknown): AppState {
@@ -292,14 +254,9 @@
     }
   }
 
-  function frameCount(): number {
-    if (stage === "timeline") return entries.length;
-    return compareGroup.length;
-  }
-
   function initBlink(): void {
     blink?.destroy();
-    blink = new BlinkController(Math.max(1, frameCount()), fps);
+    blink = new BlinkController(Math.max(1, steps.length), fps);
     blink.playing = playing && !difference;
     blink.onFrame((frame) => {
       if (difference) return;
@@ -311,73 +268,33 @@
 
   function drawFrame(force = false): void {
     if (!frames || !rendererA) return;
-    if (stage === "timeline") {
-      const entry = entries[frameIndex];
-      if (!entry) return;
-      const key = `timeline:${difference ? "diff" : frameIndex}:${bandValue}`;
-      if (force || uploadedKey !== key) {
-        if (difference) {
-          const reference = referenceEntry();
-          if (!reference) return;
-          rendererA.setPlane(reference.plane, 0);
-          rendererA.setPlane(entry.plane, 1);
-        } else {
-          rendererA.setPlane(entry.plane, 0);
-        }
-        uploadedKey = key;
-      }
-      rendererA.setWindow(frames.window);
-      rendererA.setPreset(preset);
-      rendererA.setMode(difference ? "difference" : "single");
-      rendererA.draw();
-
-      const meta = entry.meta;
-      if (difference) {
-        const reference = referenceEntry()?.meta;
-        statusMessage =
-          `Difference: ${visitLabel(meta)} − ${visitLabel(reference)} · ` +
-          `${formatLambda(meta)} · one window for the whole stack`;
-        altText =
-          `Difference image: visit ${visitLabel(meta)} on ${formatDate(meta.date)} ` +
-          `minus reference ${visitLabel(reference)} on ${formatDate(reference?.date)}. ` +
-          `${formatLambda(meta)}, ${scaleText()}, ${unitsText()}. ` +
-          "Blue means brighter in the current visit, amber means fainter, magenta marks missing pixels. Every frame in the stack shares one stretch window.";
-      } else {
-        statusMessage =
-          `Visit ${frameIndex + 1} of ${entries.length} · ${formatDate(meta.date)} · ` +
-          `${formatMjd(meta.mjd)} · ${releaseText(meta)} · ${formatLambda(meta)}`;
-        altText =
-          `Visit ${frameIndex + 1} of ${entries.length}: ${formatDate(meta.date)}, ` +
-          `${formatMjd(meta.mjd)}, release ${releaseText(meta)}, detector ${meta.detector ?? "unknown"}, ` +
-          `${formatLambda(meta)}, ${scaleText()}, ${unitsText()}. ` +
-          "Frames play in date order at the selected speed and share one stretch window.";
-      }
-      return;
-    }
-
-    const group = compareGroup;
-    if (group.length < 2) return;
-    const entry = group[Math.min(frameIndex, group.length - 1)];
-    const key = `compare:${difference ? "diff" : frameIndex}:${bandValue}`;
+    const entry = steps[frameIndex];
+    if (!entry) return;
+    const referenceEntry = steps[referenceIndex] ?? steps[0];
+    const stackKey = stage === "timeline" ? bandValue : bandIndex;
+    const key = `${stage}:${difference ? "diff" : frameIndex}:${stackKey}:${frames.window.sha256}`;
     if (force || uploadedKey !== key) {
-      if (difference) {
-        rendererA.setPlane(group[0].plane, 0);
-        rendererA.setPlane(group[1].plane, 1);
+      if (difference && referenceEntry) {
+        rendererA.setPlane(referenceEntry.plane, 0);
+        rendererA.setPlane(entry.plane, 1);
       } else {
         rendererA.setPlane(entry.plane, 0);
       }
       uploadedKey = key;
     }
     rendererA.setWindow(frames.window);
-    rendererA.setPreset(preset);
+    rendererA.setPreset(tone);
     rendererA.setMode(difference ? "difference" : "single");
     rendererA.draw();
     statusMessage = difference
-      ? `Difference ${visitLabel(group[1].meta)} − ${visitLabel(group[0].meta)} · ${formatLambda(group[0].meta)}`
-      : `Survey compare ${frameIndex + 1} of 2 · ${releaseText(entry.meta)} · ${formatLambda(entry.meta)}`;
-    altText = difference
-      ? `Difference image of the two survey epochs at ${formatLambda(group[0].meta)}, ${scaleText()}, ${unitsText()}.`
-      : `Survey compare frame ${frameIndex + 1} of 2: ${releaseText(entry.meta)}, ${formatLambda(entry.meta)}, ${scaleText()}, ${unitsText()}.`;
+      ? "Difference image on."
+      : stage === "compare"
+        ? `Survey compare step ${frameIndex + 1} of ${steps.length}.`
+        : `Visit ${frameIndex + 1} of ${steps.length}.`;
+  }
+
+  function redrawForResize(): void {
+    rendererA?.draw();
   }
 
   function setFpsValue(value: number): void {
@@ -385,21 +302,21 @@
     blink?.setFps(fps);
   }
 
-  function setPresetValue(next: RenderPreset): void {
-    preset = next;
-    if (frames && rendererA) {
-      drawFrame();
-    }
+  function setToneValue(next: RenderPreset): void {
+    tone = next;
+    drawFrame();
   }
 
   function togglePlayback(): void {
-    if (difference) return;
+    if (difference || !steps.length) return;
     playing = !playing;
     if (blink) blink.playing = playing;
   }
 
   function goTo(index: number): void {
-    frameIndex = Math.max(0, Math.min(index, frameCount() - 1));
+    if (!steps.length) return;
+    frameIndex = Math.max(0, Math.min(index, steps.length - 1));
+    if (difference && frameIndex === referenceIndex) difference = false;
     playing = false;
     if (blink) {
       blink.playing = false;
@@ -409,7 +326,30 @@
     shareView();
   }
 
+  function setReference(index: number): void {
+    if (!steps.length) return;
+    referenceIndex = Math.max(0, Math.min(index, steps.length - 1));
+    if (difference && frameIndex === referenceIndex) difference = false;
+    uploadedKey = "";
+    drawFrame(true);
+  }
+
+  function setCompareBand(index: number): void {
+    if (stage !== "compare" || bandIndex === index) return;
+    bandIndex = index;
+    // The pair changes together, so the first epoch is the new current step.
+    frameIndex = 0;
+    if (referenceIndex === 0) difference = false;
+    uploadedKey = "";
+    drawFrame(true);
+  }
+
+  function step(delta: number): void {
+    goTo(frameIndex + delta);
+  }
+
   function setDifference(next: boolean): void {
+    if (next && !canDifference) return;
     difference = next;
     if (next) {
       playing = false;
@@ -420,7 +360,7 @@
   }
 
   async function setBandValue(band: number): Promise<void> {
-    if (!detail || stage !== "timeline") return;
+    if (!detail || stage !== "timeline" || band === bandValue) return;
     bandValue = band;
     await loadFrames(detail.id, band);
   }
@@ -433,13 +373,19 @@
   }
 
   function onKeydown(event: KeyboardEvent): void {
-    if (event.code !== "Space" || event.repeat) return;
+    if (event.repeat || event.defaultPrevented) return;
     const target = event.target as HTMLElement | null;
-    if (target?.closest("input, button, select, textarea, a, [contenteditable]")) {
+    if (target?.closest("input, select, textarea, [contenteditable]")) return;
+    if (event.code === "Space") {
+      if (target?.closest("button, a")) return;
+      event.preventDefault();
+      togglePlayback();
       return;
     }
-    event.preventDefault();
-    togglePlayback();
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      step(event.key === "ArrowLeft" ? -1 : 1);
+    }
   }
 
   function shareView(): void {
@@ -475,18 +421,22 @@
       const planes = buffers.map((buffer) => decodeSpx1(buffer));
       frames = response;
       decodedPlanes = planes;
-      bandValue =
-        stage === "timeline"
-          ? (response.band ?? band ?? detail?.timeline?.default_band ?? 0)
-          : 0;
+      if (stage === "timeline") {
+        bandValue =
+          response.band ?? band ?? detail?.timeline?.default_band ?? 0;
+      } else {
+        // Compare bins are 0-based indices; the timeline band is preserved.
+        bandIndex = Math.max(0, response.planes[0]?.band_index ?? 0);
+      }
       frameIndex =
         stage === "timeline"
           ? Math.min(view.visit ?? 0, response.planes.length - 1)
           : 0;
       referenceIndex = 0;
+      difference = false;
+      appState = { kind: "ready", title: "Ready", message: "" };
       await tick();
       if (!setupRenderers()) return;
-      appState = { kind: "ready", title: "Ready", message: "" };
       uploadedKey = "";
       playing = view.visit === undefined;
       initBlink();
@@ -514,7 +464,7 @@
       const target = await fetchTarget(id);
       detail = target;
       selectedId = id;
-      // Keep the shared band and frame: they are what a shared URL pins.
+
       const sharedBand = view.band;
       const sharedVisit = view.visit;
       view = {
@@ -619,10 +569,10 @@
     }
   }
 
-  function onTargetChange(): void {
-    const target = targets.find((item) => item.id === selectedId);
+  function onTargetChange(id: string): void {
+    const target = targets.find((item) => item.id === id);
     if (!target) return;
-    // A band and a frame belong to one target's stack; never carry them across.
+
     view = { ra: view.ra, dec: view.dec, fov: view.fov };
     void loadTarget(target.id, view.fov);
   }
@@ -645,382 +595,99 @@
   });
 </script>
 
-<a class="skip-link" href="#main">Skip to content</a>
+<a
+  class="sr-only rounded-control bg-text px-2 py-1 text-bg focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:z-50"
+  href="#main">Skip to content</a
+>
 
-<header class="site-header">
-  <div class="brand">
-    <h1>DRIFT</h1>
-    <p>Diffrential Infrared Frame Tracker</p>
-  </div>
-  <p
-    class="badge"
-    data-state={badgeState}
-    data-fixture={manifest?.fixture ?? false}
-    id="snapshot-badge"
-  >
-    {#if manifest}
-      {#if manifest.fixture}
-        <span class="fixture-flag">Fixture</span>
-      {/if}
-      <span>{manifest.snapshot_id}</span>
-      <span>{formatAge(snapshotAge)}</span>
-      <span>last run {formatRun(manifest.generated_at)}</span>
-    {:else}
-      Loading snapshot…
-    {/if}
-  </p>
-</header>
+<div
+  class="flex min-h-0 flex-col overflow-hidden bg-bg text-text"
+  style="height:100vh; height:100dvh;"
+>
+  <Header
+    {manifest}
+    {snapshotAge}
+    {targets}
+    {selectedId}
+    {railOpen}
+    onTarget={onTargetChange}
+    onToggleRail={() => (railOpen = !railOpen)}
+  />
 
-<main id="main">
-  <div class="layout">
-    <section class="stage" aria-labelledby="stage-title">
-      <div class="stage-header">
-        <h2 id="stage-title">Matched-wavelength visit timeline</h2>
-        {#if frames && stage === "timeline"}
-          <span class="note">
-            {frames.visits ?? entries.length} visits · band {frames.band} ·
-            {frames.detector ?? "detector"} · one window
-          </span>
-        {:else if frames}
-          <span class="note">
-            {frames.bins ?? 0} bands × {frames.epochs?.length ?? 0} epochs · one
-            window
-          </span>
-        {/if}
-      </div>
-      <p class="lede">
-        Wavelengths are matched before any comparison, and every frame in a stack
-        comes from one detector. Visits play in date order and share one
-        ingest-computed stretch window, the same pixel scale, and the same units,
-        so playback cannot flatter one visit. Motion below one pixel is measured,
-        not seen.
-      </p>
+  <main id="main" class="flex min-h-0 flex-1">
+    <div class="flex min-h-0 min-w-0 flex-1 flex-col">
+      <Stage
+        bind:canvas={canvasA}
+        {ready}
+        stateKind={appState.kind}
+        stateTitle={appState.title}
+        stateMessage={appState.message}
+        retry={appState.retryable ? retry : undefined}
+        frame={currentFacts}
+        {caption}
+        {altText}
+        {statusMessage}
+        label={canvasLabel}
+        pixelScaleArcsec={frames?.pixel_scale_arcsec ?? 0}
+        planePx={frames?.planes[0]?.width ?? 512}
+        {difference}
+        {notes}
+        onResize={redrawForResize}
+      />
 
-      {#if manifest?.fixture}
-        <p class="fixture-warning" role="note">
-          Fixture snapshot — synthetic pixels, not archive data. It exists to
-          exercise the API and renderer, and the production publish path refuses
-          it without an explicit flag.
-        </p>
-      {/if}
+      <Dock
+        steps={steps}
+        index={frameIndex}
+        {playing}
+        {difference}
+        {canDifference}
+        {tone}
+        {bands}
+        band={stage === "timeline"
+          ? bandValue
+          : (compareGroup[0]?.meta.band ?? bandIndex)}
+        {compareBands}
+        {bandIndex}
+        {referenceIndex}
+        {fps}
+        minFps={MIN_FPS}
+        maxFps={MAX_FPS}
+        degraded={frames?.degraded ?? false}
+        omitted={frames?.frames_omitted ?? []}
+        shown={frames?.visits ?? steps.length}
+        available={frames?.available_visits ?? steps.length}
+        compare={stage === "compare"}
+        disabled={!steps.length || !ready}
+        onGoTo={goTo}
+        onStep={step}
+        onTogglePlay={togglePlayback}
+        onDifference={() => setDifference(!difference)}
+        onReference={setReference}
+        onTone={setToneValue}
+        onBand={(band) => void setBandValue(band)}
+        onCompareBand={setCompareBand}
+        onFps={setFpsValue}
+      />
+    </div>
 
-      {#if frames && strip.length}
-        <div class="mode-tabs" role="tablist" aria-label="Image mode">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={stage === "timeline"}
-            disabled={!detail?.modes.timeline?.enabled}
-            onclick={() => void setStage("timeline")}
-          >
-            Visit timeline
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={stage === "compare"}
-            disabled={!detail?.modes.survey_compare?.enabled}
-            onclick={() => void setStage("compare")}
-          >
-            Survey compare
-          </button>
-        </div>
-
-        <div class="image-grid">
-          <figure class="image-panel" data-panel="image">
-            <canvas
-              bind:this={canvasA}
-              tabindex="0"
-              aria-label={panelLabel()}
-              aria-describedby="canvas-alt"
-              aria-keyshortcuts="Space"
-            ></canvas>
-            <figcaption>
-              <strong>
-                {difference
-                  ? `${visitLabel(currentEntry()?.meta)} − ${visitLabel(referenceEntry()?.meta)}`
-                  : formatDate(currentEntry()?.meta?.date)}
-              </strong>
-              <span>{difference ? "difference" : formatMjd(currentEntry()?.meta?.mjd)}</span>
-              <span>{releaseText(currentEntry()?.meta)}</span>
-              <span>detector {currentEntry()?.meta?.detector ?? "—"}</span>
-              <span>λ {formatLambda(currentEntry()?.meta)}</span>
-              <span>{scaleText()}</span>
-              <span>{unitsText()}</span>
-              <span>
-                {difference
-                  ? `against ${formatDate(referenceEntry()?.meta?.date)}`
-                  : `visit ${frameIndex + 1}/${strip.length}`}
-              </span>
-            </figcaption>
-          </figure>
-        </div>
-        <p class="status" role="status" aria-live="polite">{statusMessage}</p>
-
-        <section aria-label="Visit filmstrip">
-          <ol class="filmstrip">
-            {#each strip as entry, index (entry.meta.visit_id ?? entry.meta.index)}
-              <li>
-                <button
-                  type="button"
-                  aria-pressed={index === stripIndex}
-                  aria-label={`Frame ${index + 1}: ${entry.meta.visit_id ?? entry.meta.epoch_id ?? "frame"}, ${formatDate(entry.meta.date)}, ${formatMjd(entry.meta.mjd ?? entry.meta.mjd_min)}, ${releaseText(entry.meta)}`}
-                  onclick={() => goTo(index)}
-                >
-                  <span class="tick">{index + 1}</span>
-                  <span class="date">
-                    {entry.meta.date
-                      ? shortDate(entry.meta.date)
-                      : (entry.meta.epoch_id ?? "—")}
-                  </span>
-                  <span class="mjd">{formatMjd(entry.meta.mjd ?? entry.meta.mjd_min)}</span>
-                  <span class="release">{releaseText(entry.meta)}</span>
-                </button>
-              </li>
-            {/each}
-          </ol>
-          <p class="note">
-            {#if stage === "timeline"}
-              {#if frames.degraded}
-                Degraded: {frames.frames_omitted?.length ?? 0}
-                {(frames.frames_omitted?.length ?? 0) === 1 ? "visit" : "visits"}
-                omitted, thinned evenly over MJD.
-              {:else}
-                {frames.visits ?? entries.length} of
-                {frames.available_visits ?? entries.length} available visits shown.
-              {/if}
-            {:else}
-              Two survey epochs, matched on measured wavelength.
-            {/if}
-          </p>
-        </section>
-      {:else}
-        <StateView
-          state={appState.kind}
-          title={appState.title}
-          message={appState.message}
-          onRetry={appState.retryable ? retry : undefined}
-        />
-      {/if}
-
-      <p id="canvas-alt" class="sr-only" aria-live="polite">{altText}</p>
-
-      <section class="provenance" aria-label="Provenance">
-        <p>
-          Visit
-          <strong>{currentEntry()?.meta?.visit_id ?? "—"}</strong>
-          {formatDate(currentEntry()?.meta?.date)}
-        </p>
-        <p>{formatMjd(currentEntry()?.meta?.mjd)}</p>
-        <p>
-          Release <strong>{releaseText(currentEntry()?.meta)}</strong> · detector
-          <strong>{currentEntry()?.meta?.detector ?? "—"}</strong>
-        </p>
-        <p>λ <strong>{formatLambda(currentEntry()?.meta)}</strong> matched</p>
-        <p>Pixel scale <strong>{scaleText()}</strong></p>
-        <p>Units <strong>{unitsText()}</strong></p>
-        <p>
-          Window sha
-          <strong>{frames ? frames.window.sha256.slice(0, 12) : "—"}</strong>
-        </p>
-      </section>
-
-      <section class="controls" aria-label="Playback and stretch controls">
-        <div>
-          <label for="fps">Playback speed <output>{fps} fps</output></label>
-          <input
-            id="fps"
-            type="range"
-            min={MIN_FPS}
-            max={MAX_FPS}
-            step="1"
-            value={fps}
-            aria-valuetext={`${fps} frames per second`}
-            oninput={(event) => setFpsValue(Number(event.currentTarget.value))}
-            disabled={!strip.length || difference}
-          />
-        </div>
-        <div>
-          <button
-            type="button"
-            onclick={togglePlayback}
-            aria-pressed={playing}
-            disabled={!strip.length || difference}
-          >
-            {difference ? "Paused for difference" : playing ? "Pause" : "Play"}
-          </button>
-          <button
-            type="button"
-            aria-pressed={difference}
-            onclick={() => setDifference(!difference)}
-            disabled={!strip.length || frameIndex === referenceIndex}
-            title={frameIndex === referenceIndex
-              ? "This frame is the difference reference; choose another visit."
-              : "Compare this frame with the reference visit."}
-          >
-            Difference
-          </button>
-          <p class="note">
-            Space toggles playback when focus is not in a control. Difference
-            compares the current visit with a reference visit from the same stack;
-            it is disabled while the current frame is that reference.
-          </p>
-        </div>
-        <div>
-          <label for="band">
-            Wavelength band
-            <output>{frames?.band ?? bandValue}</output>
-          </label>
-          <select
-            id="band"
-            value={String(bandValue)}
-            onchange={(event) => void setBandValue(Number(event.currentTarget.value))}
-            disabled={!strip.length || stage !== "timeline" || bands.length < 2}
-          >
-            {#each bands as band (band)}
-              <option value={String(band)}>Band {band}</option>
-            {/each}
-          </select>
-        </div>
-        <div>
-          <label for="preset">Stretch preset</label>
-          <select
-            id="preset"
-            value={preset}
-            onchange={(event) =>
-              setPresetValue(event.currentTarget.value as RenderPreset)}
-            disabled={!strip.length}
-          >
-            <option value="linear">Linear</option>
-            <option value="asinh">Asinh</option>
-            <option value="log">Log</option>
-          </select>
-        </div>
-        <p class="note">
-          Linear, asinh and log all derive from this band's single window (lo, hi,
-          s); changing preset never recomputes the window.
-        </p>
-      </section>
-    </section>
-
-    <aside class="sidebar" aria-label="Target and mode details">
-      <div class="card">
-        <h2>Target</h2>
-        <label class="sr-only" for="target-select">Target</label>
-        <select
-          id="target-select"
-          bind:value={selectedId}
-          onchange={onTargetChange}
-        >
-          {#each targets as target (target.id)}
-            <option value={target.id}>{targetLabel(target)}</option>
-          {/each}
-        </select>
-
-        {#if detail}
-          <dl>
-            <dt>Name</dt>
-            <dd>{targetLabel(detail)}</dd>
-            <dt>Class</dt>
-            <dd>{detail.kind ?? "unknown"}</dd>
-            <dt>RA</dt>
-            <dd>{detail.ra === null ? "—" : `${detail.ra.toFixed(5)}°`}</dd>
-            <dt>Dec</dt>
-            <dd>{detail.dec === null ? "—" : `${detail.dec.toFixed(5)}°`}</dd>
-            <dt>Default band</dt>
-            <dd>
-              {detail.timeline?.default_band ?? "—"} · detector
-              {detail.timeline?.default_detector ?? "—"}
-            </dd>
-            <dt>Visits</dt>
-            <dd>
-              {detail.timeline?.visits ?? 0} at the default band · span
-              {detail.timeline?.span_days === null ||
-              detail.timeline?.span_days === undefined
-                ? "—"
-                : `${detail.timeline.span_days.toFixed(2)} d`}
-            </dd>
-            <dt>Epochs</dt>
-            <dd>
-              {detail.epochs
-                .map(
-                  (epoch) =>
-                    `${epoch.release.toUpperCase()} (MJD ${
-                      epoch.mjd_min === null ? "—" : epoch.mjd_min.toFixed(2)
-                    })`,
-                )
-                .join(" · ")}
-            </dd>
-            <dt>Pixel scale</dt>
-            <dd>{detail.pixel_scale_arcsec.toFixed(3)}″/px</dd>
-            <dt>Units</dt>
-            <dd>{detail.units}</dd>
-            <dt>Field of view</dt>
-            <dd>{view.fov.toFixed(2)}°</dd>
-          </dl>
-          <MiniMap
-            ra={detail.ra ?? view.ra}
-            dec={detail.dec ?? view.dec}
-            fov={view.fov}
-            label={`Sky position RA ${(detail.ra ?? view.ra).toFixed(
-              3,
-            )} degrees, Dec ${(detail.dec ?? view.dec).toFixed(
-              3,
-            )} degrees, field of view ${view.fov.toFixed(2)} degrees`}
-          />
-          {#if detail.caveats?.length}
-            <ul class="caveats">
-              {#each detail.caveats as caveat}
-                <li>{caveat}</li>
-              {/each}
-            </ul>
-          {/if}
-          <h3>Modes</h3>
-          <ul class="mode-list">
-            {#each modeRows as row (row.key)}
-              <li data-enabled={row.enabled}>
-                <strong>{row.label}</strong>
-                <span>
-                  {row.enabled ? "Available" : `Not available: ${row.reason}`}
-                </span>
-              </li>
-            {/each}
-          </ul>
-        {:else}
-          <p class="note">No target loaded for this view.</p>
-        {/if}
-      </div>
-
-      <div class="card">
-        <h2>Shareable view</h2>
-        <dl>
-          <dt>RA</dt>
-          <dd>{view.ra.toFixed(5)}°</dd>
-          <dt>Dec</dt>
-          <dd>{view.dec.toFixed(5)}°</dd>
-          <dt>FOV</dt>
-          <dd>{view.fov.toFixed(2)}°</dd>
-          <dt>Band</dt>
-          <dd>{view.band ?? "—"}</dd>
-          <dt>Visit</dt>
-          <dd>{view.visit === undefined ? "—" : view.visit + 1}</dd>
-        </dl>
-        <p class="note">
-          The URL query <code>?ra=&amp;dec=&amp;fov=&amp;band=&amp;visit=</code>
-          restores this view, down to the frame, on reload and can be shared.
-        </p>
-      </div>
-    </aside>
-  </div>
-</main>
-
-<footer class="site-footer">
-  <div>
-    <p class="citation">{manifest?.citation ?? CITATION}</p>
-    <p>
-      SPHEREx data via IRSA. Gaia DR3, AllWISE/NEOWISE, SkyBoT/IMCCE, Astropy and
-      reproject are cited in the submission. Code: AGPL-3.0.
-    </p>
-  </div>
-  <p><a href="/api/v1/health">Service health</a></p>
-</footer>
+    <Rail
+      {detail}
+      {frames}
+      stack={stackFacts}
+      modes={modeRows}
+      {view}
+      citation={manifest?.citation ?? CITATION}
+      band={frames
+        ? stage === "timeline"
+          ? bandValue
+          : (compareGroup[0]?.meta.band ?? bandIndex)
+        : null}
+      {stage}
+      {tone}
+      {histogram}
+      window={frames?.window ?? null}
+      open={railOpen}
+      onStage={(next) => void setStage(next)}
+    />
+  </main>
+</div>

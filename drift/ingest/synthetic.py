@@ -128,8 +128,8 @@ SYNTHETIC_TARGETS: tuple[SyntheticTargetSpec, ...] = (
             ("qr3", 61280.200000),
         ),
         caveats=(
-            "Synthetic star field, not archive pixels.",
-            "Motion below one pixel is measured, not seen.",
+            "Please keep in mind this is a test star field.",
+            "Motion below one pixel may not be seen.",
         ),
         motion_px=1.85,
     ),
