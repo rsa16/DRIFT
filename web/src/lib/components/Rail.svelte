@@ -27,6 +27,7 @@
     tone: RenderPreset;
     histogram: HistogramData | null;
     window: WindowInfo | null;
+    sourceUrl: string | null;
     open: boolean;
     onStage: (stage: "timeline" | "compare") => void;
   }
@@ -43,6 +44,7 @@
     tone,
     histogram,
     window: stretchWindow,
+    sourceUrl,
     open,
     onStage,
   }: Props = $props();
@@ -191,6 +193,20 @@
               <dd class="m-0 text-right text-text">{item.value}</dd>
             </div>
           {/each}
+          {#if sourceUrl}
+            <div class="flex items-baseline justify-between gap-2 border-b border-line/60 pb-1">
+              <dt class="text-faint">Source</dt>
+              <dd class="m-0 text-right text-text">
+                <a
+                  class="text-signal underline-offset-2 hover:underline"
+                  href={sourceUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={sourceUrl}>this visit's cutout</a
+                >
+              </dd>
+            </div>
+          {/if}
           {#if frames?.mode === "timeline"}
             <div class="flex items-baseline justify-between gap-2 pt-1.5">
               <dt class="text-faint">Stack</dt>

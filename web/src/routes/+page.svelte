@@ -140,9 +140,7 @@
   const reference = $derived<PlaneEntry | null>(
     steps[referenceIndex] ?? steps[0] ?? null,
   );
-  const stackMeta = $derived<PlaneMeta | undefined>(
-    stage === "timeline" ? frames?.planes[0] : compareGroup[0]?.meta,
-  );
+  const stackMeta = $derived<PlaneMeta | undefined>(current?.meta);
   const canDifference = $derived(
     !!current && steps.length > 1 && frameIndex !== referenceIndex,
   );
@@ -686,6 +684,7 @@
       {tone}
       {histogram}
       window={frames?.window ?? null}
+      sourceUrl={current?.meta.source_url ?? null}
       open={railOpen}
       onStage={(next) => void setStage(next)}
     />

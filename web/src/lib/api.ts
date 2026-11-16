@@ -101,6 +101,8 @@ export interface PlaneMeta {
   static_href: string;
   bytes: number;
   sha256: string;
+  source_url?: string | null;
+  saturated?: boolean | null;
   window_sha256: string;
 }
 

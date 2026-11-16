@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from drift.api import create_app
 from drift.config import Settings
 from drift.ingest import cli
+from drift.ingest.real import build_real_snapshot
 from drift.ingest.synthetic import build_synthetic_snapshot
 from drift.manifest import (
     FixtureSnapshotError,
@@ -23,11 +24,24 @@ from drift.manifest import (
 )
 from drift.planes import decode_plane
 
+FIXTURE = Path(__file__).parent / "fixtures" / "archive"
+
 
 @pytest.fixture(scope="session")
 def snapshot_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
     root = tmp_path_factory.mktemp("snapshots")
     build_synthetic_snapshot(root)
+    return root
+
+
+@pytest.fixture(scope="session")
+def real_snapshot_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("real-snapshots")
+    build_real_snapshot(
+        root,
+        fixture=FIXTURE,
+        generated_at="2026-11-15T23:59:00Z",
+    )
     return root
 
 
@@ -44,6 +58,11 @@ def _settings(root: Path, *, allow_fixture: bool = True) -> Settings:
 @pytest.fixture
 def client(snapshot_root: Path) -> TestClient:
     return TestClient(create_app(_settings(snapshot_root)))
+
+
+@pytest.fixture
+def real_client(real_snapshot_root: Path) -> TestClient:
+    return TestClient(create_app(_settings(real_snapshot_root, allow_fixture=False)))
 
 
 def _count_key(value: Any, wanted: str) -> int:
@@ -323,3 +342,156 @@ def test_target_and_snapshot_ids_are_fixture_marked_in_every_response(
     assert detail["fixture"] is True
     assert all(target["fixture"] is True for target in targets["targets"])
     assert json.dumps(detail["snapshot_id"]).startswith('"fixture-')
+
+
+# Real fixture wiring -------------------------------------------------------
+
+
+def test_deep_collections_map_to_their_processing_release() -> None:
+    assert cli.release_from_collection("spherex_dr1_deep") == "dr1"
+    assert cli.release_from_collection("spherex_qr3_deep") == "qr3"
+    assert cli.release_from_collection("spherex_dr1") == "dr1"
+
+
+def test_build_cli_writes_a_real_snapshot_with_egress_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def blocked(*args, **kwargs):
+        raise AssertionError("build command attempted network access")
+
+    monkeypatch.setattr("drift.archive.UrllibTransport.get", blocked)
+
+    exit_code = cli.main(
+        [
+            "build",
+            "--fixture",
+            str(FIXTURE),
+            "--snapshot-dir",
+            str(tmp_path),
+            "--generated-at",
+            "2026-11-15T23:59:00Z",
+        ]
+    )
+
+    assert exit_code == 0
+    pointer = load_latest(tmp_path)
+    assert pointer is not None
+    assert not pointer.snapshot_id.startswith("fixture-")
+    manifest = pointer.load_manifest(tmp_path)
+    assert manifest.fixture is False
+    assert {target.id for target in manifest.targets} == {
+        "bamberga",
+        "lpv",
+        "barnard",
+    }
+
+
+def test_real_snapshot_is_published_and_every_file_matches_its_hash(
+    real_snapshot_root: Path,
+) -> None:
+    pointer = load_latest(real_snapshot_root)
+
+    assert pointer is not None
+    assert not pointer.snapshot_id.startswith("fixture-")
+    manifest = pointer.load_manifest(real_snapshot_root)
+    assert manifest.schema_version == 1
+    assert manifest.fixture is False
+    assert manifest.status == "published"
+    assert manifest.files
+    files_by_path = {entry.path: entry for entry in manifest.files}
+    for entry in manifest.files:
+        path = real_snapshot_root / entry.path
+        assert path.is_file(), entry.path
+        assert entry.bytes == path.stat().st_size
+        assert entry.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert manifest.watermark
+    assert len(str(manifest.watermark.get("rows_sha256"))) == 64
+    assert manifest.source
+    assert manifest.source["row_counts"]
+    labels_by_target = {target.id: set(target.labels) for target in manifest.targets}
+    assert "saturated" in labels_by_target["barnard"]
+    assert "saturated" not in labels_by_target["bamberga"]
+    for target in manifest.targets:
+        for visit in target.visits:
+            assert visit.release in {"dr1", "qr3"}
+            for frame in visit.frames:
+                assert frame.source_url
+                assert frame.source_url.startswith("https://irsa.ipac.caltech.edu/")
+                assert frame.lambda_um and frame.dlambda_um
+                assert frame.sha256
+                assert frame.saturated is not None
+                assert frame.href
+                entry = files_by_path[frame.href]
+                assert entry.sha256 == frame.sha256
+                assert entry.bytes == frame.bytes
+        for epoch in target.epochs:
+            for frame in epoch.frames:
+                assert frame.href
+                entry = files_by_path[frame.href]
+                assert entry.sha256 == frame.sha256
+
+
+@pytest.mark.parametrize("target_id", ["bamberga", "lpv", "barnard"])
+def test_matched_wavelength_tolerance_and_single_window(
+    real_client: TestClient, target_id: str
+) -> None:
+    response = real_client.get(
+        f"/api/v1/targets/{target_id}/frames?mode=timeline&visits=16"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    planes = body["planes"]
+    assert body["mode"] == "timeline"
+    assert len(planes) >= 2
+    assert len({plane["window_sha256"] for plane in planes}) == 1
+    assert body["window"]["sha256"] == planes[0]["window_sha256"]
+    for plane in planes:
+        assert plane["visit_id"]
+        assert plane["date"].endswith("Z")
+        assert isinstance(plane["mjd"], float)
+        assert plane["release"] in {"dr1", "qr3"}
+        assert plane["detector"] == body["detector"]
+        assert plane["lambda_lo_um"] <= plane["lambda_um"] <= plane["lambda_hi_um"]
+        assert plane["source_url"].startswith("https://irsa.ipac.caltech.edu/")
+    for left in planes:
+        for right in planes:
+            assert abs(left["lambda_um"] - right["lambda_um"]) <= (
+                0.5 * left["dlambda_um"] + 1e-9
+            )
+
+
+def test_real_bamberga_timeline_holds_the_two_dr1_visits(
+    real_client: TestClient,
+) -> None:
+    body = real_client.get(
+        "/api/v1/targets/bamberga/frames?mode=timeline&visits=8"
+    ).json()
+
+    assert body["visits"] == 2
+    assert body["degraded"] is False
+    assert {plane["release"] for plane in body["planes"]} == {"dr1"}
+    gap = body["planes"][1]["mjd"] - body["planes"][0]["mjd"]
+    assert gap == pytest.approx(1.288, abs=0.001)
+    assert body["span_days"] == pytest.approx(gap)
+
+
+def test_real_snapshot_exposes_source_links_in_both_modes(
+    real_client: TestClient,
+) -> None:
+    timeline = real_client.get(
+        "/api/v1/targets/lpv/frames?mode=timeline&visits=16"
+    ).json()
+    compare = real_client.get("/api/v1/targets/barnard/frames?mode=epoch&bins=8").json()
+
+    assert timeline["planes"][0]["source_url"]
+    assert len({plane["source_url"] for plane in timeline["planes"]}) > 1
+    assert compare["planes"]
+    detail = real_client.get("/api/v1/targets/barnard").json()
+    assert compare["window"]["sha256"] == detail["window"]["sha256"]
+    for plane in compare["planes"]:
+        assert plane["source_url"]
+        assert plane["release"] in {"dr1", "qr3"}
+        assert plane["date"].endswith("Z")
+        assert isinstance(plane["mjd"], float)
+        assert plane["window_sha256"] == compare["window"]["sha256"]

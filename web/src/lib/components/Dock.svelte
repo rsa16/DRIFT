@@ -100,6 +100,20 @@
   );
   const labelPosition = (pct: number) => Math.min(92, Math.max(8, pct));
 
+  function rangeExtent(group: { start: number; end: number }): {
+    left: number;
+    width: number;
+  } {
+    const start = positions[group.start] ?? 0;
+    const end = positions[group.end] ?? 0;
+    const width = Math.max(4, end - start);
+    const left = Math.min(
+      Math.max((start + end) / 2 - width / 2, 0),
+      100 - width,
+    );
+    return { left, width };
+  }
+
   function releaseTitle(release: string): string {
     if (release === "DR1") return "DR1 — Data Release 1 (reprocessed)";
     if (release === "QR3") return "QR3 — Quick Release 3 (minimally validated)";
@@ -137,34 +151,32 @@
 >
   <div class="flex flex-col gap-1.5 px-3 py-2">
     <div
-      class="grid grid-cols-[2.75rem_minmax(0,1fr)] grid-rows-[18px_32px] items-center gap-x-2"
+      class="grid grid-cols-[2.75rem_minmax(0,1fr)] grid-rows-[20px_32px] items-center gap-x-2"
       data-testid="cadence"
     >
       <span class="section-label" aria-hidden="true">Ranges</span>
       <div
-        class="relative h-[18px] select-none"
+        class="relative h-5 select-none"
         aria-hidden="true"
         data-testid="ranges"
       >
         {#each groups as group (group.release + group.start)}
-          {@const start = positions[group.start] ?? 0}
-          {@const end = positions[group.end] ?? 0}
-          {@const width = Math.max(0, end - start)}
+          {@const extent = rangeExtent(group)}
           <span
             class="absolute inset-y-0 rounded-[2px] bg-signal/[0.06]"
-            style={`left:${start}%; width:${width}%`}
+            style={`left:${extent.left}%; width:${extent.width}%`}
           ></span>
           <span
-            class="absolute top-0 h-px bg-line-strong"
-            style={`left:${start}%; width:${width}%`}
+            class="absolute top-0 h-px bg-muted/40"
+            style={`left:${extent.left}%; width:${extent.width}%`}
           ></span>
           <span
-            class="absolute top-0 h-[7px] w-px bg-line-strong"
-            style={`left:${start}%`}
+            class="absolute top-0 h-[7px] w-px bg-muted/40"
+            style={`left:${extent.left}%`}
           ></span>
           <span
-            class="absolute top-0 h-[7px] w-px bg-line-strong"
-            style={`left:${end}%`}
+            class="absolute top-0 h-[7px] w-px bg-muted/40"
+            style={`left:${extent.left + extent.width}%`}
           ></span>
         {/each}
         {#each groups as group (group.release + group.start)}
@@ -201,11 +213,10 @@
         data-testid="strip"
       >
         {#each groups as group (group.release + group.start)}
-          {@const start = positions[group.start] ?? 0}
-          {@const end = positions[group.end] ?? 0}
+          {@const extent = rangeExtent(group)}
           <span
             class="absolute inset-y-0 rounded-[2px] bg-signal/[0.05]"
-            style={`left:${start}%; width:${Math.max(0, end - start)}%`}
+            style={`left:${extent.left}%; width:${extent.width}%`}
             aria-hidden="true"
           ></span>
         {/each}

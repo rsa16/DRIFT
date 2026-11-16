@@ -385,6 +385,8 @@ def _plane_payload(
         "static_href": f"/v1/{manifest.snapshot_id}/planes/{filename}",
         "bytes": frame.bytes,
         "sha256": frame.sha256,
+        "source_url": frame.source_url,
+        "saturated": frame.saturated,
         "window_sha256": window_hash,
     }
 
@@ -512,7 +514,12 @@ def frames_payload(
     budget = max(1, BLINK_PLANE_BUDGET // len(pair))
     selected: list[tuple[int, Any]] = _thin(by_band, min(bins, budget))
 
-    window = _window_payload(manifest)
+    # A real compare stack usually shares one matched band, so use that band's
+    # window rather than the snapshot-wide fallback (which is another target's
+    # statistics). Multi-band compares keep the one-window contract by falling
+    # back to the snapshot window.
+    window_band = shared[0] if len(shared) == 1 else None
+    window = _window_payload(manifest, target, window_band)
     window_hash = str(window["sha256"])
     processing = _processing(manifest)
     planes: list[dict[str, Any]] = []
@@ -536,6 +543,7 @@ def frames_payload(
             dlambda_um = float(
                 plane_frame.dlambda_um or band_reference.dlambda_um or 0.0
             )
+            extra = plane_frame.model_dump(mode="json")
             planes.append(
                 {
                     "index": len(planes),
@@ -546,6 +554,10 @@ def frames_payload(
                     "survey": epoch.survey,
                     "mjd_min": epoch.mjd_min,
                     "mjd_max": epoch.mjd_max,
+                    "visit_id": extra.get("visit_id"),
+                    "mjd": extra.get("mjd"),
+                    "date": extra.get("date"),
+                    "saturated": plane_frame.saturated,
                     "lambda_um": lambda_um,
                     "lambda_lo_um": lambda_um - dlambda_um / 2.0,
                     "lambda_hi_um": lambda_um + dlambda_um / 2.0,
@@ -559,6 +571,7 @@ def frames_payload(
                     "static_href": f"/v1/{manifest.snapshot_id}/planes/{filename}",
                     "bytes": plane_frame.bytes,
                     "sha256": plane_frame.sha256,
+                    "source_url": plane_frame.source_url,
                     "window_sha256": window_hash,
                 }
             )
