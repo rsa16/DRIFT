@@ -1,6 +1,7 @@
 <script lang="ts">
   import HelpDialog from "$lib/components/HelpDialog.svelte";
   import type { ManifestSummary, TargetSummary } from "$lib/api";
+  import type { ViewState } from "$lib/ShareState";
 
   interface Props {
     manifest: ManifestSummary | null;
@@ -10,9 +11,11 @@
     railOpen: boolean;
     liveEnabled: boolean;
     liveActive: boolean;
+    view: ViewState;
+    hasPosition: boolean;
     onTarget: (id: string) => void;
     onToggleRail: () => void;
-    onLive: () => void;
+    onCoordinates: () => void;
   }
 
   let {
@@ -23,13 +26,17 @@
     railOpen,
     liveEnabled,
     liveActive,
+    view,
+    hasPosition,
     onTarget,
     onToggleRail,
-    onLive,
+    onCoordinates,
   }: Props = $props();
 
   const button =
     "inline-flex h-7 items-center gap-1.5 rounded-control border border-line bg-raised px-2 text-label leading-none text-muted transition-colors hover:bg-hover hover:text-text disabled:cursor-not-allowed disabled:opacity-40";
+  const coordinateButton =
+    "inline-flex h-7 items-center gap-1.5 rounded-control border border-signal/60 bg-signal/10 px-2 text-label leading-none text-signal transition-colors hover:bg-signal/20";
 
   let copied = $state(false);
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -38,13 +45,7 @@
   const selected = $derived(
     targets.find((target) => target.id === selectedId) ?? null,
   );
-  const selectedLabel = $derived(
-    liveActive
-      ? "Live sky position"
-      : selected
-        ? targetLabel(selected)
-        : "",
-  );
+  const selectValue = $derived(liveActive ? "" : selectedId);
 
   function formatAge(seconds: number | null): string {
     if (seconds === null || seconds === undefined) return "unknown age";
@@ -83,32 +84,36 @@
 
   <span class="h-5 w-px shrink-0 bg-line" aria-hidden="true"></span>
 
-  <label class="sr-only" for="target-select">Target</label>
-  <div class="relative min-w-0">
-    <select
-      id="target-select"
-      class="h-7 w-[20rem] max-w-[26vw] min-w-[11rem] appearance-none rounded-control border border-line bg-raised px-2 pr-6 text-fine text-text"
-      value={selectedId}
-      title={selectedLabel ? `${selectedLabel} — ${selectedId}` : "Select a target"}
-      onchange={(event) => onTarget(event.currentTarget.value)}
+  {#if liveEnabled}
+    <button
+      type="button"
+      class={coordinateButton}
+      aria-haspopup="dialog"
+      title="Change the sky position. Coordinates are looked up in the live archive."
+      data-testid="coordinates-button"
+      onclick={onCoordinates}
     >
-      {#if liveActive}
-        <option value="live">Live sky position</option>
+      <svg
+        viewBox="0 0 12 12"
+        class="h-3 w-3 fill-none stroke-current [stroke-width:1.4]"
+        aria-hidden="true"
+      >
+        <circle cx="6" cy="6" r="1.6" class="fill-current stroke-none" />
+        <path d="M6 0.8v2M6 9.2v2M0.8 6h2M9.2 6h2" />
+      </svg>
+      <span>Position</span>
+      {#if hasPosition}
+        <span class="hidden font-mono text-fine text-muted min-[1240px]:inline">
+          {view.ra.toFixed(2)}°, {view.dec.toFixed(2)}°
+        </span>
       {/if}
-      {#each targets as target (target.id)}
-        <option value={target.id} title={targetLabel(target)}>
-          {targetLabel(target)}
-        </option>
-      {/each}
-    </select>
-    <svg
-      class="pointer-events-none absolute right-2 top-1/2 h-2 w-2 -translate-y-1/2 fill-faint"
-      viewBox="0 0 8 8"
-      aria-hidden="true"
-    >
-      <path d="M0 2h8L4 7z" />
-    </svg>
-  </div>
+      <span class="text-signal">Change</span>
+    </button>
+  {/if}
+
+  {#if liveEnabled}
+    <span class="h-5 w-px shrink-0 bg-line" aria-hidden="true"></span>
+  {/if}
 
   <div
     class="flex min-w-0 items-center gap-2 text-fine text-faint"
@@ -134,25 +139,33 @@
   </div>
 
   <div class="ml-auto flex shrink-0 items-center gap-2">
-    {#if liveEnabled}
-      <button
-        type="button"
-        class={button}
-        aria-haspopup="dialog"
-        title="Fetch a timeline for any sky position from the live archive."
-        onclick={onLive}
+    <label class="section-label shrink-0" for="target-select">Demo</label>
+    <div class="relative">
+      <select
+        id="target-select"
+        class="h-7 w-[13rem] appearance-none rounded-control border border-line bg-raised px-2 pr-6 text-fine text-text"
+        value={selectValue}
+        title={selected ? `Demo target: ${targetLabel(selected)} — ${selectedId}` : "Open a demo target"}
+        onchange={(event) => onTarget(event.currentTarget.value)}
       >
-        <svg
-          viewBox="0 0 12 12"
-          class="h-3 w-3 fill-none stroke-signal [stroke-width:1.4]"
-          aria-hidden="true"
-        >
-          <circle cx="6" cy="6" r="1.6" class="fill-signal stroke-none" />
-          <path d="M6 0.8v2M6 9.2v2M0.8 6h2M9.2 6h2" />
-        </svg>
-        Live
-      </button>
-    {/if}
+        {#if !selectedId || liveActive}
+          <option value="" disabled>Demo target…</option>
+        {/if}
+        {#each targets as target (target.id)}
+          <option value={target.id} title={targetLabel(target)}>
+            {targetLabel(target)}
+          </option>
+        {/each}
+      </select>
+      <svg
+        class="pointer-events-none absolute right-2 top-1/2 h-2 w-2 -translate-y-1/2 fill-faint"
+        viewBox="0 0 8 8"
+        aria-hidden="true"
+      >
+        <path d="M0 2h8L4 7z" />
+      </svg>
+    </div>
+    <span class="h-5 w-px shrink-0 bg-line" aria-hidden="true"></span>
     <button
       type="button"
       class={button}

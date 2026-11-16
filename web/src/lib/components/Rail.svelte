@@ -43,6 +43,8 @@
     sourceUrl: string | null;
     open: boolean;
     onStage: (stage: "timeline" | "compare") => void;
+    coordinatesEnabled: boolean;
+    onCoordinates: () => void;
   }
 
   let {
@@ -62,6 +64,8 @@
     sourceUrl,
     open,
     onStage,
+    coordinatesEnabled,
+    onCoordinates,
   }: Props = $props();
 
   const RAIL_WIDTH = 344;
@@ -137,6 +141,16 @@
               <dd class="m-0 text-text">{detail.epochs.length}</dd>
             </div>
           </dl>
+          {#if coordinatesEnabled}
+            <button
+              type="button"
+              class="mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-control border border-signal/60 bg-signal/10 px-2 py-1 text-label text-signal transition-colors hover:bg-signal/20"
+              data-testid="edit-coordinates"
+              onclick={onCoordinates}
+            >
+              Change coordinates
+            </button>
+          {/if}
         {:else}
           <p class="text-label text-faint">No target loaded for this view.</p>
         {/if}

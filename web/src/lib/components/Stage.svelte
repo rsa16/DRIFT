@@ -1,4 +1,6 @@
 <script lang="ts">
+  import type { Snippet } from "svelte";
+
   import StateView from "$lib/components/StateView.svelte";
   import {
     chooseScaleBar,
@@ -23,6 +25,7 @@
     planePx: number;
     difference: boolean;
     notes: string[];
+    stateSlot?: Snippet;
     onResize: () => void;
   }
 
@@ -42,6 +45,7 @@
     planePx,
     difference,
     notes,
+    stateSlot,
     onResize,
   }: Props = $props();
 
@@ -183,6 +187,8 @@
             </div>
           </div>
         </div>
+      {:else if stateSlot}
+        {@render stateSlot()}
       {:else}
         <StateView
           state={stateKind}

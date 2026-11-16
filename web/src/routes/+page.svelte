@@ -4,7 +4,8 @@
   import DegradedBanner from "$lib/components/DegradedBanner.svelte";
   import Dock from "$lib/components/Dock.svelte";
   import Header from "$lib/components/Header.svelte";
-  import LiveDialog from "$lib/components/LiveDialog.svelte";
+  import PositionDialog from "$lib/components/PositionDialog.svelte";
+  import PositionPrompt from "$lib/components/PositionPrompt.svelte";
   import Rail from "$lib/components/Rail.svelte";
   import Stage from "$lib/components/Stage.svelte";
   import {
@@ -886,64 +887,56 @@
       snapshotAge = health.snapshot_age_s;
 
       const shared = parseShareState(window.location.search);
-      let chosen =
-        targets.find((target) => target.modes.timeline?.enabled) ?? targets[0];
 
-      if (shared) {
-        view = shared;
-        const match = targets.find(
-          (target) =>
-            target.ra !== null &&
-            target.dec !== null &&
-            separationDeg(target.ra, target.dec, shared.ra, shared.dec) <=
-              Math.max(shared.fov / 2, 0.25),
-        );
-        if (!match) {
-          if (liveEnabled) {
-            await loadLive(shared.ra, shared.dec, shared.fov, DEFAULT_VISITS);
-            return;
-          }
-          selectedId = "";
-          detail = null;
-          appState = {
-            kind: "no-data",
-            title: "No data at this shared position",
-            message:
-              `The shared view is RA ${shared.ra.toFixed(5)}°, ` +
-              `Dec ${shared.dec.toFixed(5)}°, FOV ${shared.fov.toFixed(2)}°. ` +
-              "No snapshot target covers it, so nothing is drawn rather than " +
-              "showing a different patch of sky.",
-          };
-          return;
-        }
-        chosen = match;
-        if (shared.band) bandValue = shared.band;
-      } else if (chosen) {
-        view = {
-          ra: chosen.ra ?? 0,
-          dec: chosen.dec ?? 0,
-          fov: DEFAULT_FOV,
-        };
-      }
-
-      if (!chosen) {
+      if (!shared) {
+        view = { ra: 0, dec: 0, fov: DEFAULT_FOV };
+        selectedId = "";
+        detail = null;
         appState = {
-          kind: "no-data",
-          title: "No targets in this snapshot",
-          message: "The snapshot published no targets.",
+          kind: "choose-position",
+          title: "Choose a sky position",
+          message: "",
         };
         return;
       }
-      await loadTarget(chosen.id, view.fov);
+
+      view = shared;
+      const match = targets.find(
+        (target) =>
+          target.ra !== null &&
+          target.dec !== null &&
+          separationDeg(target.ra, target.dec, shared.ra, shared.dec) <=
+            Math.max(shared.fov / 2, 0.25),
+      );
+      if (!match) {
+        if (liveEnabled) {
+          await loadLive(shared.ra, shared.dec, shared.fov, DEFAULT_VISITS);
+          return;
+        }
+        selectedId = "";
+        detail = null;
+        appState = {
+          kind: "no-data",
+          title: "No data at this shared position",
+          message:
+            `The shared view is RA ${shared.ra.toFixed(5)}°, ` +
+            `Dec ${shared.dec.toFixed(5)}°, FOV ${shared.fov.toFixed(2)}°. ` +
+            "No snapshot target covers it, so nothing is drawn rather than " +
+            "showing a different patch of sky.",
+        };
+        return;
+      }
+      if (shared.band) bandValue = shared.band;
+      await loadTarget(match.id, view.fov);
     } catch (error) {
       appState = errorState(error);
     }
   }
 
   function onTargetChange(id: string): void {
+    if (!id) return;
     if (id === "live") {
-      liveNotice = "";
-      liveOpen = true;
+      openCoordinates();
       return;
     }
     const target = targets.find((item) => item.id === id);
@@ -951,6 +944,11 @@
 
     view = { ra: view.ra, dec: view.dec, fov: view.fov };
     void loadTarget(target.id, view.fov);
+  }
+
+  function openCoordinates(): void {
+    liveNotice = "";
+    liveOpen = true;
   }
 
   function retry(): void {
@@ -983,6 +981,21 @@
   href="#main">Skip to content</a
 >
 
+{#snippet positionPrompt()}
+  <PositionPrompt
+    {liveEnabled}
+    ra={view.ra}
+    dec={view.dec}
+    fov={view.fov}
+    maxFov={manifest?.live_max_fov_deg ?? 1}
+    {targets}
+    busy={liveBusy}
+    notice={liveNotice}
+    onLive={(ra, dec, fov, bins) => void loadLive(ra, dec, fov, bins)}
+    onDemo={(id) => void loadTarget(id, view.fov)}
+  />
+{/snippet}
+
 <div
   class="flex min-h-0 flex-col overflow-hidden bg-bg text-text"
   style="height:100vh; height:100dvh;"
@@ -995,12 +1008,11 @@
     {railOpen}
     {liveEnabled}
     {liveActive}
+    {view}
+    hasPosition={selectedId !== ""}
     onTarget={onTargetChange}
     onToggleRail={() => (railOpen = !railOpen)}
-    onLive={() => {
-      liveNotice = "";
-      liveOpen = true;
-    }}
+    onCoordinates={openCoordinates}
   />
 
   <main id="main" class="flex min-h-0 flex-1">
@@ -1012,6 +1024,9 @@
         stateTitle={appState.title}
         stateMessage={appState.message}
         retry={appState.retryable ? retry : undefined}
+        stateSlot={appState.kind === "choose-position"
+          ? positionPrompt
+          : undefined}
         frame={currentFacts}
         {caption}
         {altText}
@@ -1122,11 +1137,13 @@
       sourceUrl={current?.meta.source_url ?? null}
       open={railOpen}
       onStage={(next) => void setStage(next)}
+      coordinatesEnabled={liveEnabled}
+      onCoordinates={openCoordinates}
     />
   </main>
 
   {#if liveEnabled}
-    <LiveDialog
+    <PositionDialog
       open={liveOpen}
       ra={view.ra}
       dec={view.dec}

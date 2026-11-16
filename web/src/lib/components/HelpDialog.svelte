@@ -19,6 +19,14 @@
 
   const terms: { term: string; text: string }[] = [
     {
+      term: "Position",
+      text: "The right ascension and declination of the patch of sky, plus the field of view. Use Position in the header or Change coordinates in the side panel to edit them. Coordinates are looked up in the live archive.",
+    },
+    {
+      term: "Demo target",
+      text: "A position prepared in the pinned snapshot. The Demo menu opens one; live coordinates do not need it.",
+    },
+    {
       term: "Visit",
       text: "One SPHEREx exposure of this part of the sky. The timeline starts with the oldest visit.",
     },
@@ -112,6 +120,7 @@
       Controls
     </h3>
     <ul class="m-0 mb-4 flex list-none flex-col gap-1.5 p-0">
+      <li><kbd class={key}>Position</kbd> Edit RA, Dec and field of view; live coordinates fetch a new timeline.</li>
       <li><kbd class={key}>Space</kbd> Play or pause the stack.</li>
       <li><kbd class={key}>←</kbd> <kbd class={key}>→</kbd> Move to the previous or next visit.</li>
       <li>Click a tick in the timeline to jump to that visit.</li>
